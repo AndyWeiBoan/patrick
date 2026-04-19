@@ -1,0 +1,59 @@
+{
+  "_comment": "Add this to ~/.claude/settings.json or .claude/settings.json to connect Claude to Patrick memory.",
+  "mcpServers": {
+    "patrick-memory": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3141/sse"
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/patrick/hooks/session_start.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/patrick/hooks/prompt_submit.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/patrick/hooks/post_tool_use.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/patrick/hooks/stop.py",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
