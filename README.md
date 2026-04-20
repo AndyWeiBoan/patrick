@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="README.md">English</a> | <a href="README_ZH.md">中文</a>
+</p>
+
 <p align="center">
   <img src="https://upload.wikimedia.org/wikipedia/en/3/33/Patrick_Star.svg" alt="Patrick Star" width="180"/>
 </p>
