@@ -63,6 +63,14 @@ async def _process_item(item: dict) -> None:
     role = item.get("role", "user")
     source = "hook"
 
+    # stop hook carries no text but should trigger a final centroid update
+    # so session_summaries reflects the completed session state.
+    if hook == "stop" and session_id:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, storage.compute_and_upsert_centroid, session_id)
+        logger.debug("Centroid triggered by stop hook for session %s", session_id)
+        return
+
     if not text or not session_id:
         return
 
@@ -114,6 +122,22 @@ async def _batch_worker() -> None:
                 logger.error("Error processing hook event: %s", exc, exc_info=True)
             finally:
                 _queue.task_done()
+
+        # After batch completes, update centroid for every session that received new chunks.
+        # Batch layer is the natural throttle — one centroid update per session per batch,
+        # regardless of how many chunks that session produced in this batch.
+        seen_sessions = {
+            item["session_id"]
+            for item in batch
+            if item.get("session_id") and item.get("hook") != "stop"
+        }
+        if seen_sessions:
+            loop = asyncio.get_running_loop()
+            for sid in seen_sessions:
+                try:
+                    await loop.run_in_executor(None, storage.compute_and_upsert_centroid, sid)
+                except Exception as exc:
+                    logger.error("Centroid update failed for session %s: %s", sid, exc)
 
 
 def start_worker() -> None:

@@ -10,6 +10,15 @@ MAX_OUTPUT_BYTES = 8_192  # truncate large tool outputs
 MAX_SEMANTIC_CHARS = 500  # max chars for semantic output snippet
 
 
+# Patrick's own MCP tools — skip to prevent echo chamber (retrieved memories
+# re-entering the store and polluting future searches with recalled content).
+_SKIP_TOOLS = {
+    "memory_save", "memory_search", "memory_deep_search", "memory_sessions",
+    "mcp__patrick-memory__memory_save", "mcp__patrick-memory__memory_search",
+    "mcp__patrick-memory__memory_deep_search", "mcp__patrick-memory__memory_sessions",
+}
+
+
 def format_tool_text(tool_name: str, tool_input: dict, tool_response: dict) -> str:
     """Convert raw tool data into natural-language text for better embedding quality."""
 
@@ -95,6 +104,10 @@ def main() -> None:
     tool_response = data.get("tool_response", {})
 
     if not session_id:
+        return
+
+    # Skip Patrick's own tool calls — don't store retrieved memories back into the store
+    if tool_name in _SKIP_TOOLS or tool_name.lower() in _SKIP_TOOLS:
         return
 
     # Guard: truncate tool_response bytes before processing

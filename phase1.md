@@ -75,7 +75,9 @@
     - `hooks/post_tool_use.py`：讀 stdin JSON（含 session_id）→ **tool-specific formatter** 轉成自然語言 → POST `/observe`，截斷 >8KB output（~100 行）
       - `format_tool_text()` 依 `tool_name` 分派：Bash → `執行了指令：{cmd}\n結果：{output[:500]}`；Read → `讀取了檔案：{path}`；Write → `寫入了檔案：{path}`；Edit/MultiEdit → `修改了檔案：{path}，舊：…，新：…`；Glob/Grep → pattern + path；WebFetch/WebSearch → query；其他 → `使用了工具 {name}，輸入：{input[:200]}`
       - **設計原則**：不存 raw JSON wrapper，只存語意關鍵欄位，避免格式標記（`[Tool:`、`Input:`）污染 embedding 向量
-    - `hooks/stop.py`：讀 stdin JSON → POST `/observe`，標記 session 完成（~30 行）
+    - `hooks/stop.py`：讀 stdin JSON → 從 `transcript_path` 讀完整 JSONL transcript → 提取所有 assistant 文字回覆（去重 by `message.id`）→ 逐條 POST `{hook: "stop-text", role: "assistant"}` → 最後 POST `{hook: "stop"}` 觸發 session 完成
+      - **實作注意（已 spike 驗證 ✅）**：transcript JSONL 格式為 `entry["message"]["role"]`（巢狀），非 top-level `entry["role"]`。同一 message 可能因 streaming 被拆成多行（thinking/text/tool_use 各一行），以 `message.id` 去重才能正確合並
+      - stop hook stdin payload 直接含 `last_assistant_message`（最後一條文字）與 `transcript_path`（完整路徑），兩個欄位均已確認存在
     - session_id 取得方式：從 hook stdin JSON 的 `session_id` 欄位讀取（snake_case），fallback `uuid4()`（無 env var 路徑，官方文件確認不存在）
     - 所有腳本 fire-and-forget，timeout 3 秒，失敗靜默不影響 Claude 運作
 11. **claude config 範本**：`claude_config_example.json`（含 MCP server 設定 + hooks.json 設定），讓使用者一分鐘接上
@@ -227,4 +229,5 @@ multilingual-e5-small（Phase 1 起手，輕量優先）
 - MinHash 去重（Phase 2）
 - 並發寫入保護（Phase 2）
 - LanceDB compaction 策略（Phase 2）
+- tool call 噪音權重調整（Phase 2）：post_tool_use 記錄不是噪音，是低權重信號；Phase 2 依 tool_name / source 做差異化搜尋排序，而非直接過濾
 - PyPI 發布（Phase 4）

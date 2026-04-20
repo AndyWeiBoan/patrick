@@ -97,6 +97,11 @@ def main() -> None:
     if not session_id:
         return
 
+    # Skip Patrick's own tools — storing search/save results creates echo chamber
+    SKIP_TOOLS = {"memory_save", "memory_search", "memory_deep_search", "memory_sessions"}
+    if tool_name in SKIP_TOOLS:
+        return
+
     # Guard: truncate tool_response bytes before processing
     response_str = json.dumps(tool_response, ensure_ascii=False)
     if len(response_str.encode()) > MAX_OUTPUT_BYTES:

@@ -35,10 +35,15 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     name="patrick-memory",
     instructions=(
-        "Local memory server. "
-        "Use memory_save sparingly (only for important decisions, explicit user requests, or session summaries). "
-        "Use memory_search for quick lookups. "
-        "Use memory_deep_search for questions needing full context."
+        "Local memory server that stores and retrieves conversation history across sessions. "
+        "PROACTIVE USAGE RULES:\n"
+        "1. At the START of any session where the user mentions past work, an ongoing project, "
+        "a previous decision, or anything that implies continuity — call memory_deep_search FIRST, "
+        "before answering. Do not rely on in-context memory alone.\n"
+        "2. Use memory_deep_search for questions needing full context or cross-session recall.\n"
+        "3. Use memory_search for quick single-fact lookups.\n"
+        "4. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries. "
+        "memory_save is ALWAYS required after memory_deep_search — see that tool's instructions."
     ),
 )
 
