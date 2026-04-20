@@ -1,12 +1,12 @@
-<p align="right">
-  <a href="README.md">English</a> | <a href="README_ZH.md">中文</a>
-</p>
-
 <p align="center">
-  <img src="https://upload.wikimedia.org/wikipedia/en/3/33/Patrick_Star.svg" alt="派大星" width="180"/>
+  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Patrick_Star_character.png/250px-Patrick_Star_character.png" alt="派大星" width="180"/>
 </p>
 
 <h1 align="center">Patrick</h1>
+
+<p align="center">
+  <a href="README.md">English</a> &nbsp;|&nbsp; <a href="README_ZH.md"><b>中文</b></a>
+</p>
 
 <p align="center">
   <em>零 Token、完全本地的 Claude Code 跨 session 記憶系統。</em>
@@ -116,14 +116,68 @@ source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-這會安裝 `patrick` CLI 及所有依賴（LanceDB、fastembed、FastMCP、uvicorn 等）。
-
-> **首次啟動說明：** fastembed 會在第一次啟動時下載 `multilingual-e5-small`（約 120 MB）並快取到本地。後續啟動不需重新下載。
-
-### 第三步 — 啟動 Patrick server
+### 第三步 — 預下載嵌入模型
 
 ```bash
-patrick serve
+patrick init
+```
+
+這會下載 `multilingual-e5-small`（約 120 MB）並快取到本地，同時執行快速健康檢查確認模型和 LanceDB 正常運作。後續啟動不需重新下載。
+
+```
+Patrick init — downloading embedding model...
+  Model: intfloat/multilingual-e5-small
+  Embedding model: ✓ downloaded / cached
+  Tokenizer: ✓ loaded
+  Sanity check: ✓ embedded 1 text → 384-dim vector
+  LanceDB: ✓ connected at ~/.patrick/db
+
+✓ Patrick init complete. Run: patrick start
+```
+
+### 第四步 — 設定 Claude Code
+
+執行一行指令完成設定。它會自動將 MCP server 和四個 hook 寫入 `~/.claude/settings.json`：
+
+```bash
+patrick setup
+```
+
+你會看到變更預覽並確認後套用：
+
+```
+Patrick setup
+==================================================
+
+[1/3] Hook scripts
+  ✓ /path/to/patrick/hooks/session_start.py
+  ✓ /path/to/patrick/hooks/prompt_submit.py
+  ✓ /path/to/patrick/hooks/post_tool_use.py
+  ✓ /path/to/patrick/hooks/stop.py
+
+[2/3] Settings file: ~/.claude/settings.json
+  ~ Will add mcpServers.patrick-memory
+  ~ Will add hooks.SessionStart
+  ~ Will add hooks.UserPromptSubmit
+  ~ Will add hooks.PostToolUse
+  ~ Will add hooks.Stop
+
+[3/3] Apply changes
+  Apply now? [y/N]: y
+  ✓ Written to ~/.claude/settings.json
+
+Next steps:
+  patrick start    # run the memory server
+  Restart Claude Code for hooks to take effect.
+```
+
+> 跳過確認提示：`patrick setup --auto`
+> 只預覽不寫入：`patrick setup --dry-run`
+
+### 第五步 — 啟動 Patrick server
+
+```bash
+patrick start
 ```
 
 成功啟動後你會看到：
@@ -136,87 +190,41 @@ INFO:     Uvicorn running on http://127.0.0.1:3141
 
 保持這個終端機視窗開著（或設定為背景服務，見下方說明）。
 
-### 第四步 — 設定 Claude Code
+### 第六步 — 重啟 Claude Code 並驗證
 
-開啟你的 Claude Code 設定檔，有兩個位置可選：
+重啟 Claude Code 讓 hooks 生效，然後執行健康檢查：
 
-- **全域設定**（套用到所有專案）：`~/.claude/settings.json`
-- **專案設定**（僅套用到目前 repo）：`.claude/settings.json`
-
-加入以下設定（可參考 `claude_config_example.json`）：
-
-```json
-{
-  "mcpServers": {
-    "patrick-memory": {
-      "type": "sse",
-      "url": "http://127.0.0.1:3141/sse"
-    }
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/session_start.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/prompt_submit.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/post_tool_use.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/stop.py",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+patrick doctor
 ```
 
-將 `/ABSOLUTE/PATH/TO/patrick` 替換為你的 repo 實際絕對路徑（例如 `/Users/you/projects/patrick`）。
-
-### 第五步 — 驗證
-
-開啟一個新的 Claude Code session。Patrick 會自動開始捕捉對話。若要確認 MCP 連線正常，可以問 Claude：
-
 ```
-列出我最近的記憶 sessions。
+Patrick doctor
+==================================================
+
+[Server]
+  ✓ Server is running at http://127.0.0.1:3141
+
+[Hook scripts]
+  ✓ session_start.py
+  ✓ prompt_submit.py
+  ✓ post_tool_use.py
+  ✓ stop.py
+
+[settings.json]
+  ✓ MCP server configured
+  ✓ hooks.SessionStart
+  ✓ hooks.UserPromptSubmit
+  ✓ hooks.PostToolUse
+  ✓ hooks.Stop
+
+[Embedding model]
+  ✓ Model cached: intfloat/multilingual-e5-small
+
+All checks passed.
 ```
 
-Claude 會呼叫 `memory_sessions` 並顯示目前儲存的 session 列表。
+Patrick 開始運行後，你與 Claude Code 的每一段對話都會被自動捕捉。
 
 ---
 
@@ -235,7 +243,7 @@ cat > ~/Library/LaunchAgents/com.patrick.memory.plist << EOF
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/patrick/.venv/bin/patrick</string>
-    <string>serve</string>
+    <string>start</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -253,6 +261,18 @@ launchctl load ~/Library/LaunchAgents/com.patrick.memory.plist
 ```
 
 Log 輸出位於 `/tmp/patrick.log`。
+
+---
+
+## CLI 指令參考
+
+| 指令 | 說明 |
+|---|---|
+| `patrick init` | 預下載嵌入模型並執行健康檢查 |
+| `patrick setup` | 自動設定 Claude Code hooks + MCP 至 `~/.claude/settings.json` |
+| `patrick start` | 啟動 memory server |
+| `patrick doctor` | 健康檢查——server、hooks、設定、模型快取 |
+| `patrick hooks-path` | 印出已安裝 hook 腳本的絕對路徑 |
 
 ---
 
@@ -281,7 +301,6 @@ Log 輸出位於 `/tmp/patrick.log`。
 
 ## 專案狀態
 
-- **Phase 1**（目前）：完整可用——自動 hook 捕捉、兩層向量搜尋、centroid session 摘要、去重、MCP server。
+- **Phase 1**（目前）：完整可用——自動 hook 捕捉、兩層向量搜尋、centroid session 摘要、去重、MCP server、`patrick setup` / `init` / `doctor` CLI。
 - **Phase 2**（規劃中）：BM25 混合搜尋，改善中英文混合對話的精確關鍵字召回。
-- **Phase 3**（規劃中）：`patrick init` sanity check CLI，打包優化。
-- **Phase 4**（規劃中）：PyPI 發布。
+- **Phase 3**（規劃中）：打包優化，PyPI 發布。

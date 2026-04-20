@@ -1,12 +1,12 @@
-<p align="right">
-  <a href="README.md">English</a> | <a href="README_ZH.md">中文</a>
-</p>
-
 <p align="center">
-  <img src="https://upload.wikimedia.org/wikipedia/en/3/33/Patrick_Star.svg" alt="Patrick Star" width="180"/>
+  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Patrick_Star_character.png/250px-Patrick_Star_character.png" alt="Patrick Star" width="180"/>
 </p>
 
 <h1 align="center">Patrick</h1>
+
+<p align="center">
+  <a href="README.md"><b>English</b></a> &nbsp;|&nbsp; <a href="README_ZH.md">中文</a>
+</p>
 
 <p align="center">
   <em>Zero-token, fully-local cross-session memory for Claude Code.</em>
@@ -111,14 +111,68 @@ source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-This installs the `patrick` CLI and all dependencies (LanceDB, fastembed, FastMCP, uvicorn, etc.).
-
-> **First run note:** fastembed will download `multilingual-e5-small` (~120 MB) on first startup and cache it locally. Subsequent starts are instant.
-
-### Step 3 — Start the Patrick server
+### Step 3 — Pre-download the embedding model
 
 ```bash
-patrick serve
+patrick init
+```
+
+This downloads `multilingual-e5-small` (~120 MB) and caches it locally, then runs a quick sanity check to confirm the model and LanceDB are working correctly. Subsequent starts are instant.
+
+```
+Patrick init — downloading embedding model...
+  Model: intfloat/multilingual-e5-small
+  Embedding model: ✓ downloaded / cached
+  Tokenizer: ✓ loaded
+  Sanity check: ✓ embedded 1 text → 384-dim vector
+  LanceDB: ✓ connected at ~/.patrick/db
+
+✓ Patrick init complete. Run: patrick start
+```
+
+### Step 4 — Configure Claude Code
+
+Run the one-command setup. It automatically writes the MCP server entry and all four hooks to `~/.claude/settings.json`:
+
+```bash
+patrick setup
+```
+
+You'll see a preview of changes and be asked to confirm:
+
+```
+Patrick setup
+==================================================
+
+[1/3] Hook scripts
+  ✓ /path/to/patrick/hooks/session_start.py
+  ✓ /path/to/patrick/hooks/prompt_submit.py
+  ✓ /path/to/patrick/hooks/post_tool_use.py
+  ✓ /path/to/patrick/hooks/stop.py
+
+[2/3] Settings file: ~/.claude/settings.json
+  ~ Will add mcpServers.patrick-memory
+  ~ Will add hooks.SessionStart
+  ~ Will add hooks.UserPromptSubmit
+  ~ Will add hooks.PostToolUse
+  ~ Will add hooks.Stop
+
+[3/3] Apply changes
+  Apply now? [y/N]: y
+  ✓ Written to ~/.claude/settings.json
+
+Next steps:
+  patrick start    # run the memory server
+  Restart Claude Code for hooks to take effect.
+```
+
+> To skip the confirmation prompt, use `patrick setup --auto`.
+> To preview changes without writing anything, use `patrick setup --dry-run`.
+
+### Step 5 — Start the Patrick server
+
+```bash
+patrick start
 ```
 
 You should see:
@@ -131,87 +185,41 @@ INFO:     Uvicorn running on http://127.0.0.1:3141
 
 Keep this terminal running (or set it up as a background service — see below).
 
-### Step 4 — Configure Claude Code
+### Step 6 — Restart Claude Code and verify
 
-Open your Claude Code settings file. There are two locations:
+Restart Claude Code for the hooks to take effect. Then run a health check:
 
-- **Global** (applies to all projects): `~/.claude/settings.json`
-- **Project-level** (applies to this repo only): `.claude/settings.json`
-
-Add the following configuration (copy from `claude_config_example.json` as a reference):
-
-```json
-{
-  "mcpServers": {
-    "patrick-memory": {
-      "type": "sse",
-      "url": "http://127.0.0.1:3141/sse"
-    }
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/session_start.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/prompt_submit.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/post_tool_use.py",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/patrick/hooks/stop.py",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+patrick doctor
 ```
 
-Replace `/ABSOLUTE/PATH/TO/patrick` with the actual absolute path to your cloned repository (e.g. `/Users/you/projects/patrick`).
-
-### Step 5 — Verify
-
-Start a new Claude Code session. Patrick will automatically begin capturing your conversation. To confirm the MCP connection is live, ask Claude:
-
 ```
-List my recent memory sessions.
+Patrick doctor
+==================================================
+
+[Server]
+  ✓ Server is running at http://127.0.0.1:3141
+
+[Hook scripts]
+  ✓ session_start.py
+  ✓ prompt_submit.py
+  ✓ post_tool_use.py
+  ✓ stop.py
+
+[settings.json]
+  ✓ MCP server configured
+  ✓ hooks.SessionStart
+  ✓ hooks.UserPromptSubmit
+  ✓ hooks.PostToolUse
+  ✓ hooks.Stop
+
+[Embedding model]
+  ✓ Model cached: intfloat/multilingual-e5-small
+
+All checks passed.
 ```
 
-Claude will call `memory_sessions` and show you the sessions stored so far.
+Patrick is now running. Every conversation you have with Claude Code is automatically captured.
 
 ---
 
@@ -230,7 +238,7 @@ cat > ~/Library/LaunchAgents/com.patrick.memory.plist << EOF
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/patrick/.venv/bin/patrick</string>
-    <string>serve</string>
+    <string>start</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -248,6 +256,18 @@ launchctl load ~/Library/LaunchAgents/com.patrick.memory.plist
 ```
 
 Logs are available at `/tmp/patrick.log`.
+
+---
+
+## CLI Reference
+
+| Command | Description |
+|---|---|
+| `patrick init` | Pre-download embedding model and run sanity check |
+| `patrick setup` | Configure Claude Code hooks + MCP in `~/.claude/settings.json` |
+| `patrick start` | Start the memory server |
+| `patrick doctor` | Health check — server, hooks, settings, model cache |
+| `patrick hooks-path` | Print the absolute path to installed hook scripts |
 
 ---
 
@@ -276,7 +296,6 @@ Nothing leaves your machine.
 
 ## Project Status
 
-- **Phase 1** (current): Fully working — automatic hook capture, two-layer vector search, centroid session summaries, dedup, MCP server.
+- **Phase 1** (current): Fully working — automatic hook capture, two-layer vector search, centroid session summaries, dedup, MCP server, `patrick setup` / `init` / `doctor` CLI.
 - **Phase 2** (planned): BM25 hybrid search for improved exact-keyword recall in mixed-language conversations.
-- **Phase 3** (planned): `patrick init` sanity check CLI, packaging polish.
-- **Phase 4** (planned): PyPI release.
+- **Phase 3** (planned): Packaging polish, PyPI release.
