@@ -1,13 +1,27 @@
-"""MCP tool implementations — memory_save, memory_search, memory_deep_search, memory_sessions."""
+"""MCP tool implementations — memory_save, memory_search, memory_deep_search, memory_sessions.
+
+Phase 2 additions:
+- memory_search / memory_deep_search accept mode="hybrid" to use BM25+vector fusion
+- Cross-encoder rerank is applied when RERANK_ENABLED=True and mode="hybrid"
+- Latency tracked in response metadata when mode="hybrid"
+"""
 
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 import pandas as pd
 
-from .config import MIN_SESSION_SCORE, TOP_K_CHUNKS, TOP_K_SESSIONS
+from .config import (
+    HYBRID_RECALL_N,
+    MIN_SESSION_SCORE,
+    RERANK_ENABLED,
+    RERANK_TOP_N,
+    TOP_K_CHUNKS,
+    TOP_K_SESSIONS,
+)
 from .embedding import provider
 from .storage import storage
 
@@ -83,18 +97,60 @@ async def memory_save(
     }
 
 
-async def memory_search(query: str, top_k: int = TOP_K_CHUNKS) -> list[dict]:
+async def memory_search(
+    query: str,
+    top_k: int = TOP_K_CHUNKS,
+    mode: str = "vector",
+) -> list[dict] | dict:
     """Fast semantic search — directly searches all turn chunks.
 
     Use for: quick lookup of a specific fact or phrase.
     No session context aggregation.
+
+    mode="vector" (default): pure embedding cosine search (fast, Phase 1 behaviour)
+    mode="hybrid": BM25 + vector RRF fusion with optional cross-encoder rerank
+                   Returns {results, latency_ms, mode} instead of plain list.
     """
+    t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
-    results = storage.search_chunks(query_vector=vectors[0], top_k=top_k)
-    return _format_chunks(results)
+
+    if mode == "hybrid":
+        # Hybrid: vector + BM25 fusion, then optional cross-encoder rerank
+        recall_n = max(top_k, HYBRID_RECALL_N)
+        candidates = storage.search_chunks_hybrid(
+            query_vector=vectors[0],
+            query_text=query,
+            top_k=recall_n,  # retrieve more for reranker
+            recall_n=recall_n,
+        )
+        if RERANK_ENABLED and candidates:
+            reranked = await provider.rerank_async(
+                query=query,
+                candidates=_format_chunks(candidates),
+                top_k=top_k,
+            )
+            results = reranked
+        else:
+            results = _format_chunks(candidates[:top_k])
+
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "results": results,
+            "mode": "hybrid",
+            "rerank_applied": RERANK_ENABLED and bool(candidates),
+            "latency_ms": latency_ms,
+        }
+    else:
+        # Vector-only (original behaviour)
+        results = storage.search_chunks(query_vector=vectors[0], top_k=top_k)
+        return _format_chunks(results)
 
 
-async def memory_deep_search(query: str, top_k: int = TOP_K_CHUNKS) -> dict:
+async def memory_deep_search(
+    query: str,
+    top_k: int = TOP_K_CHUNKS,
+    mode: str = "vector",
+) -> dict:
     """Deep search with session context — two-layer retrieval.
 
     WHEN TO CALL PROACTIVELY: Call this at the start of a session when the user references
@@ -121,6 +177,7 @@ async def memory_deep_search(query: str, top_k: int = TOP_K_CHUNKS) -> dict:
     session that was not present in the retrieved results (e.g. you fixed a bug, made a
     new architectural decision, or explicitly want to record a current-session insight).
     """
+    t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
     q_vec = vectors[0]
 
@@ -132,22 +189,50 @@ async def memory_deep_search(query: str, top_k: int = TOP_K_CHUNKS) -> dict:
         if r.get("_distance", 1.0) < (1 - MIN_SESSION_SCORE)
     ]
 
-    if len(good_sessions) >= 3:
-        chunks = storage.search_chunks(q_vec, top_k=top_k, session_ids=good_sessions)
-    else:
-        # Graceful degradation: not enough session signal, fall back to global
+    use_scoped = len(good_sessions) >= 3
+    if not use_scoped:
         logger.debug("Layer 1 insufficient (%d sessions), falling back to global", len(good_sessions))
-        chunks = storage.search_chunks(q_vec, top_k=top_k)
+
+    if mode == "hybrid":
+        # Hybrid path: BM25 + vector fusion within the scoped session set
+        recall_n = max(top_k, HYBRID_RECALL_N)
+        chunks = storage.search_chunks_hybrid(
+            query_vector=q_vec,
+            query_text=query,
+            top_k=recall_n,
+            recall_n=recall_n,
+            session_ids=good_sessions if use_scoped else None,
+        )
+    else:
+        # Vector-only path (original Phase 1 behaviour)
+        chunks = (
+            storage.search_chunks(q_vec, top_k=top_k, session_ids=good_sessions)
+            if use_scoped
+            else storage.search_chunks(q_vec, top_k=top_k)
+        )
 
     # Context expansion: for each hit, pull all sibling chunks from same turn
     expanded = _expand_context(chunks)
     formatted = _format_chunks(expanded)
 
     # Sort by recency (newest first) so Claude naturally sees the most recent info first.
-    # Chunks without created_at are pushed to the end.
     formatted.sort(key=lambda c: c.get("created_at") or "", reverse=True)
 
-    # Collect unique session_ids from results (for reference only — do NOT reuse in memory_save)
+    # Optional cross-encoder rerank (hybrid mode only)
+    rerank_applied = False
+    if mode == "hybrid" and RERANK_ENABLED and formatted:
+        formatted = await provider.rerank_async(
+            query=query,
+            candidates=formatted,
+            top_k=top_k,
+        )
+        rerank_applied = True
+    else:
+        formatted = formatted[:top_k]
+
+    latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    # Collect unique session_ids from results
     retrieved_from_sessions = list(dict.fromkeys(c["session_id"] for c in formatted if c.get("session_id")))
 
     # Build session metadata map so Claude can judge recency of retrieved summaries
@@ -165,6 +250,9 @@ async def memory_deep_search(query: str, top_k: int = TOP_K_CHUNKS) -> dict:
         "results": formatted,
         "retrieved_from_sessions": retrieved_from_sessions,
         "session_metadata": session_meta,
+        "mode": mode,
+        "rerank_applied": rerank_applied,
+        "latency_ms": latency_ms,
         "note": (
             "Check session_metadata.updated_at to judge recency — older sessions may contain "
             "outdated information. role field shows 'user' vs 'assistant' to help distinguish "

@@ -1,0 +1,30 @@
+{"id": "q001", "query": "patrick project phase 1 goals", "lang": "en", "category": "project_overview", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: search for phase 1 completion criteria and MVP goals"}
+{"id": "q002", "query": "BM25 hybrid search implementation", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: hybrid search architecture decisions"}
+{"id": "q003", "query": "LanceDB schema turn_chunks fields", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: DB schema details for turn_chunks table"}
+{"id": "q004", "query": "embedding model choice fastembed multilingual", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: model selection rationale"}
+{"id": "q005", "query": "cross-encoder rerank latency budget", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: P95 latency requirements for rerank"}
+{"id": "q006", "query": "cosine dedup threshold 0.95 rationale", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: why 0.95 not 0.9"}
+{"id": "q007", "query": "session summary centroid vector calculation", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: centroid logic explanation"}
+{"id": "q008", "query": "memory_save disabled reason", "lang": "en", "category": "decision", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: why memory_save was temporarily disabled"}
+{"id": "q009", "query": "eval harness frozen benchmark 30 queries", "lang": "en", "category": "process", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: benchmark set design decisions"}
+{"id": "q010", "query": "RRF reciprocal rank fusion formula", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: RRF implementation details"}
+{"id": "q011", "query": "patrick 專案 phase 2 計畫", "lang": "zh", "category": "project_overview", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: Chinese query for phase 2 plan"}
+{"id": "q012", "query": "向量搜尋語意漂移問題", "lang": "zh", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: semantic drift discussion in Chinese"}
+{"id": "q013", "query": "session hook 觸發流程", "lang": "zh", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: hook trigger flow in Chinese"}
+{"id": "q014", "query": "記憶系統去重方法", "lang": "zh", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: deduplication approach"}
+{"id": "q015", "query": "phase 3 跨 agent 記憶一致性延後原因", "lang": "zh", "category": "decision", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: why T3 was deferred to phase 3"}
+{"id": "q016", "query": "chunk_size 400 tokens overlap 80", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: chunking parameters discussion"}
+{"id": "q017", "query": "mcp server tools registration", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: how MCP tools are registered in server.py"}
+{"id": "q018", "query": "session_summaries Layer 1 coarse filter", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: Layer 1 search design"}
+{"id": "q019", "query": "text_hash SHA256 exact dedup", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: exact dedup mechanism"}
+{"id": "q020", "query": "observer.py batch worker asyncio queue", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: batch worker implementation"}
+{"id": "q021", "query": "benchmark KPI Recall@10 nDCG MRR definition", "lang": "en", "category": "metrics", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: metric definitions and targets"}
+{"id": "q022", "query": "re-embedding cost estimate production migration", "lang": "en", "category": "process", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: re-embedding plan and cost discussion"}
+{"id": "q023", "query": "TOP_K_SESSIONS TOP_K_CHUNKS config values", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: search config parameters"}
+{"id": "q024", "query": "memory_deep_search two layer retrieval", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: deep search design rationale"}
+{"id": "q025", "query": "patrick CLI init start setup doctor commands", "lang": "en", "category": "usage", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: CLI command usage"}
+{"id": "q026", "query": "bge-reranker vs mmarco cross-encoder comparison", "lang": "en", "category": "decision", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: reranker model selection discussion"}
+{"id": "q027", "query": "fastembed ONNX runtime CPU inference", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: ONNX inference setup"}
+{"id": "q028", "query": "session end stop hook centroid update", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: stop hook and centroid trigger"}
+{"id": "q029", "query": "T4 session summary deferred phase 3 reason", "lang": "en", "category": "decision", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: T4 deferral rationale"}
+{"id": "q030", "query": "BM25 k1 b parameter grid search tuning", "lang": "en", "category": "technical", "relevant_chunk_ids": [], "notes": "NEEDS ANNOTATION: BM25 hyperparameter tuning plan"}

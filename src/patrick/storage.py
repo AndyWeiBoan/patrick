@@ -1,4 +1,11 @@
-"""LanceDB storage layer — session_summaries + turn_chunks tables."""
+"""LanceDB storage layer — session_summaries + turn_chunks tables.
+
+Phase 2 additions:
+- BM25Index: in-memory BM25 index over all turn_chunks (rebuilt on demand)
+- search_chunks_bm25(): BM25 keyword search
+- search_chunks_hybrid(): RRF fusion of vector + BM25 results
+- cosine_dedup_session(): remove semantically-duplicate chunks within a session
+"""
 
 from __future__ import annotations
 
@@ -13,7 +20,16 @@ import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
-from .config import DATA_DIR, TOP_K_CHUNKS, TOP_K_SESSIONS, MIN_SESSION_SCORE
+from .config import (
+    BM25_B,
+    BM25_K1,
+    COSINE_DEDUP_THRESHOLD,
+    DATA_DIR,
+    MIN_SESSION_SCORE,
+    RRF_K,
+    TOP_K_CHUNKS,
+    TOP_K_SESSIONS,
+)
 from .embedding import provider
 
 
@@ -315,6 +331,215 @@ class Storage:
             search = search.where(f"session_id IN ({id_list})", prefilter=True)
         df = search.to_pandas()
         return df.to_dict(orient="records")
+
+    # ── Phase 2: BM25 + Hybrid search ────────────────────────────────────────
+
+    def _build_bm25_index(
+        self, session_ids: list[str] | None = None
+    ) -> tuple["Any", list[dict]]:
+        """Build an in-memory BM25 index over turn_chunks.
+
+        Returns (BM25Okapi, [chunk_dicts_in_index_order]).
+        The chunk list preserves the position mapping needed to look up scores.
+
+        session_ids: if provided, index only those sessions (faster, more focused).
+        """
+        try:
+            from rank_bm25 import BM25Okapi  # type: ignore[import]
+        except ImportError as e:
+            raise RuntimeError(
+                "rank-bm25 not installed. Run: pip install rank-bm25"
+            ) from e
+
+        assert self._initialized
+        try:
+            if session_ids:
+                id_list = ", ".join(f"'{s}'" for s in session_ids)
+                df = self._chunks.to_pandas(
+                    filter=f"session_id IN ({id_list})"
+                )
+            else:
+                df = self._chunks.to_pandas()
+        except Exception:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return None, []
+
+        chunks = df.to_dict(orient="records")
+        # Tokenize: lowercase whitespace split (language-agnostic enough for hybrid)
+        tokenized = [str(c.get("text", "")).lower().split() for c in chunks]
+        bm25 = BM25Okapi(tokenized, k1=BM25_K1, b=BM25_B)
+        return bm25, chunks
+
+    def search_chunks_bm25(
+        self,
+        query: str,
+        top_k: int = TOP_K_CHUNKS,
+        session_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """BM25 keyword search over turn_chunks.
+
+        Returns up to top_k chunks sorted by BM25 score descending.
+        Each result has a '_bm25_score' field added.
+        """
+        bm25, chunks = self._build_bm25_index(session_ids=session_ids)
+        if bm25 is None:
+            return []
+
+        query_tokens = query.lower().split()
+        scores = bm25.get_scores(query_tokens)
+
+        # Pair (score, chunk) and sort descending
+        scored = sorted(
+            zip(scores, chunks), key=lambda x: x[0], reverse=True
+        )
+        results = []
+        for score, chunk in scored[:top_k]:
+            results.append({**chunk, "_bm25_score": float(score)})
+        return results
+
+    def search_chunks_hybrid(
+        self,
+        query_vector: list[float],
+        query_text: str,
+        top_k: int = TOP_K_CHUNKS,
+        recall_n: int = 50,
+        session_ids: list[str] | None = None,
+        rrf_k: int = RRF_K,
+    ) -> list[dict]:
+        """Hybrid search: RRF fusion of vector + BM25 results.
+
+        1. Vector search top-recall_n candidates
+        2. BM25 search top-recall_n candidates
+        3. RRF fusion → top-recall_n unique candidates ranked by fused score
+        4. Returns top_k (before cross-encoder rerank, which happens in tools.py)
+
+        Each returned chunk has '_hybrid_score' (RRF fused), '_vector_rank',
+        '_bm25_rank' fields for diagnostics.
+        """
+        # Step 1: vector recall
+        vector_results = self.search_chunks(
+            query_vector=query_vector,
+            top_k=recall_n,
+            session_ids=session_ids,
+        )
+        # Step 2: BM25 recall
+        bm25_results = self.search_chunks_bm25(
+            query=query_text,
+            top_k=recall_n,
+            session_ids=session_ids,
+        )
+
+        # Step 3: RRF fusion
+        # Build rank maps: chunk_id → rank (0-based)
+        vec_rank: dict[str, int] = {
+            c["chunk_id"]: rank
+            for rank, c in enumerate(vector_results)
+            if c.get("chunk_id")
+        }
+        bm25_rank: dict[str, int] = {
+            c["chunk_id"]: rank
+            for rank, c in enumerate(bm25_results)
+            if c.get("chunk_id")
+        }
+
+        # Collect unique chunk_ids across both result sets
+        all_ids: dict[str, dict] = {}
+        for c in vector_results + bm25_results:
+            cid = c.get("chunk_id")
+            if cid and cid not in all_ids:
+                all_ids[cid] = c
+
+        # Compute RRF score: sum of 1/(k + rank) for each list where chunk appears
+        fused: list[dict] = []
+        for cid, chunk in all_ids.items():
+            vr = vec_rank.get(cid)
+            br = bm25_rank.get(cid)
+            rrf_score = 0.0
+            if vr is not None:
+                rrf_score += 1.0 / (rrf_k + vr + 1)
+            if br is not None:
+                rrf_score += 1.0 / (rrf_k + br + 1)
+            fused.append({
+                **chunk,
+                "_hybrid_score": rrf_score,
+                "_vector_rank": vr,
+                "_bm25_rank": br,
+            })
+
+        fused.sort(key=lambda x: x["_hybrid_score"], reverse=True)
+        return fused[:top_k]
+
+    # ── Phase 2: Session-level cosine dedup ───────────────────────────────────
+
+    def cosine_dedup_session(self, session_id: str) -> int:
+        """Remove semantically-duplicate chunks within a session.
+
+        Algorithm:
+        1. Load all chunks for the session ordered by created_at DESC (newest first)
+        2. Greedily build a "keep" set: add each chunk if its cosine similarity to
+           ALL already-kept chunks is < COSINE_DEDUP_THRESHOLD
+        3. Delete chunks NOT in the keep set from turn_chunks table
+
+        Returns count of chunks deleted.
+
+        Note: deletes from LanceDB are performed via .delete(where=...).
+        The operation is session-scoped and safe to run after the stop hook.
+        """
+        assert self._initialized
+        chunks = self.get_session_chunks(session_id)
+        if len(chunks) < 2:
+            return 0
+
+        valid = [c for c in chunks if c.get("vector") is not None]
+        if len(valid) < 2:
+            return 0
+
+        # Sort newest-first so we keep the most recent version of any near-duplicate
+        valid_sorted = sorted(
+            valid,
+            key=lambda c: c.get("created_at") or "",
+            reverse=True,
+        )
+
+        mat = np.array([c["vector"] for c in valid_sorted], dtype=np.float32)
+        norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-10
+        mat_norm = mat / norms  # L2-normalised rows
+
+        keep_indices: list[int] = []
+        for i in range(len(valid_sorted)):
+            if not keep_indices:
+                keep_indices.append(i)
+                continue
+            kept_mat = mat_norm[keep_indices]  # (K, D)
+            sims = kept_mat @ mat_norm[i]  # (K,)
+            if float(sims.max()) < COSINE_DEDUP_THRESHOLD:
+                keep_indices.append(i)
+            # else: this chunk is semantically duplicated → drop
+
+        keep_ids = {valid_sorted[i]["chunk_id"] for i in keep_indices}
+        drop_ids = [
+            c["chunk_id"]
+            for c in valid_sorted
+            if c["chunk_id"] not in keep_ids
+        ]
+
+        if not drop_ids:
+            return 0
+
+        try:
+            id_list = ", ".join(f"'{cid}'" for cid in drop_ids)
+            self._chunks.delete(f"chunk_id IN ({id_list})")
+            logger.info(
+                "cosine_dedup: session=%s kept=%d dropped=%d",
+                session_id, len(keep_ids), len(drop_ids),
+            )
+        except Exception as e:
+            logger.error("cosine_dedup delete failed: %s", e)
+            return 0
+
+        return len(drop_ids)
 
     def get_turn_chunks(self, turn_id: str) -> list[dict]:
         """Fetch all chunks for a turn_id ordered by chunk_index (context expansion)."""

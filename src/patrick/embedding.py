@@ -1,9 +1,14 @@
-"""EmbeddingProvider — singleton fastembed wrapper with token-aware chunking."""
+"""EmbeddingProvider — singleton fastembed wrapper with token-aware chunking.
+
+Phase 2 additions:
+- cross_encoder_rerank(): loads cross-encoder model lazily, reranks candidates
+"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -14,14 +19,17 @@ from .config import (
     CHUNK_SIZE,
     EMBEDDING_MODEL_FASTEMBED,
     EMBEDDING_TOKENIZER_HF,
+    RERANK_MODEL,
     VECTOR_DIM,
 )
 
 if TYPE_CHECKING:
     from fastembed import TextEmbedding
 
-# One global thread pool for all CPU-bound embedding work.
-# max_workers=1: embedding doesn't benefit from concurrency; keeps memory stable.
+logger = logging.getLogger(__name__)
+
+# One global thread pool for all CPU-bound embedding + rerank work.
+# max_workers=1: serialises CPU work; keeps memory stable.
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embed")
 
 
@@ -30,6 +38,9 @@ class EmbeddingProvider:
 
     All .embed() calls are synchronous internally — callers in async context
     MUST use embed_async() or run_in_executor themselves.
+
+    Phase 2: also exposes cross_encoder_rerank_async() for reranking hybrid
+    search results without blocking the event loop.
     """
 
     _instance: "EmbeddingProvider | None" = None
@@ -38,6 +49,7 @@ class EmbeddingProvider:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
+            cls._instance._reranker = None  # lazy-loaded on first rerank call
         return cls._instance
 
     def initialize(self) -> None:
@@ -97,6 +109,64 @@ class EmbeddingProvider:
             start += CHUNK_SIZE - CHUNK_OVERLAP
 
         return chunks
+
+    # ── Phase 2: Cross-encoder rerank ─────────────────────────────────────────
+
+    def _load_reranker(self) -> None:
+        """Lazily load cross-encoder model on first rerank call.
+
+        Loads sentence-transformers CrossEncoder.  Model is downloaded once to
+        HuggingFace cache (~/.cache/huggingface) and reused on subsequent starts.
+        This intentionally defers the ~120 MB download to the first hybrid search
+        call — it doesn't block server startup.
+        """
+        if self._reranker is not None:
+            return
+        try:
+            from sentence_transformers import CrossEncoder  # type: ignore[import]
+            logger.info("Loading cross-encoder model: %s", RERANK_MODEL)
+            self._reranker = CrossEncoder(RERANK_MODEL)
+            logger.info("Cross-encoder loaded successfully")
+        except Exception as e:
+            logger.error("Failed to load cross-encoder (%s): %s", RERANK_MODEL, e)
+            self._reranker = None
+
+    def rerank_sync(
+        self, query: str, candidates: list[dict], top_k: int = 10
+    ) -> list[dict]:
+        """Rerank candidates using cross-encoder. Returns top_k best candidates.
+
+        Each candidate dict must have a 'text' field.
+        Each returned dict is the original candidate with 'rerank_score' added.
+        Falls back to original order if model unavailable.
+        """
+        self._load_reranker()
+        if self._reranker is None or not candidates:
+            return candidates[:top_k]
+
+        pairs = [(query, c["text"]) for c in candidates]
+        try:
+            scores = self._reranker.predict(pairs)
+        except Exception as e:
+            logger.warning("Cross-encoder predict failed: %s", e)
+            return candidates[:top_k]
+
+        # Attach scores and sort descending
+        scored = [
+            {**c, "rerank_score": float(s)}
+            for c, s in zip(candidates, scores)
+        ]
+        scored.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return scored[:top_k]
+
+    async def rerank_async(
+        self, query: str, candidates: list[dict], top_k: int = 10
+    ) -> list[dict]:
+        """Non-blocking wrapper around rerank_sync."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _executor, self.rerank_sync, query, candidates, top_k
+        )
 
     # ── Utility ───────────────────────────────────────────────────────────────
 

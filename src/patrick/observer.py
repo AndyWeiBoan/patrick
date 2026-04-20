@@ -65,10 +65,20 @@ async def _process_item(item: dict) -> None:
 
     # stop hook carries no text but should trigger a final centroid update
     # so session_summaries reflects the completed session state.
+    # Phase 2: also run session-level cosine dedup on stop.
     if hook == "stop" and session_id:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, storage.compute_and_upsert_centroid, session_id)
         logger.debug("Centroid triggered by stop hook for session %s", session_id)
+        # Cosine dedup: remove semantically-redundant chunks within this session
+        try:
+            dropped = await loop.run_in_executor(None, storage.cosine_dedup_session, session_id)
+            if dropped:
+                logger.info("Cosine dedup: removed %d redundant chunks for session %s", dropped, session_id)
+                # Re-run centroid after dedup so summary reflects cleaned data
+                await loop.run_in_executor(None, storage.compute_and_upsert_centroid, session_id)
+        except Exception as exc:
+            logger.warning("Cosine dedup failed for session %s: %s", session_id, exc)
         return
 
     if not text or not session_id:
