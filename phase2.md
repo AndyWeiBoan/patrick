@@ -193,4 +193,148 @@
 - **怎麼驗收**：任意乾淨環境 clone → 一條指令 → 分數與報告上 commit 數值一致（±容忍誤差）。
 - **為什麼這樣驗**：可重現性是科學化調參的前提，不可重現的 20% 提升沒有價值。
 
+---
+
+## 八、Code Review 發現的問題與修正計畫
+
+> 基於 commit `f84c4d7` 實作 review。
+> 分級：🔴 Critical（直接阻擋 KPI 或 baseline）｜🟠 High（影響 KPI 歸因）｜🟡 Medium（影響量測準確度）
+> 每條統一格式：位置 → 問題描述 → 白話文 → 解法 → 白話文 → 狀態。
+> 原「反對意見（Review of the Review）」章節的 R1/R2/R3 已併入對應條目（C4/C6/C2）的解法段，作為最終採用的穩妥版本，不再獨立列出。
+
+---
+
+### 執行優先序
+
+- [x] 1st｜C1（ground truth 標注）— M1 第一件事
+- [x] 2nd｜Med2（eval README 補說明）— M1 標注開始前
+- [x] 3rd｜H3（recency sort 移除/移後）— M1 baseline 量測前
+- [x] 4th｜C2（Phase 1 baseline 凍結，用臨時 branch 法）— C1 + H3 完成後立即
+- [x] 5th｜C6（CI quality gate，硬卡 == 30）— C1 完成後
+- [x] 6th｜C3（BM25 cache）— M2 前
+- [x] 7th｜C4（BM25 中文 tokenizer：jieba + char fallback）— M2 前
+- [x] 8th｜C5（expand 移到 rerank 後）— M2 前
+- [x] 9th｜H1（reindex CLI）— M3 前
+- [x] 10th｜H4（死常數清除或實作 weighted RRF）— M3 grid search 前
+- [x] 11th｜Med1（P95 off-by-one）— 順手
+- [x] 12th｜H2（T6 補交付：latency 分布 + 成本腳本）— M4 前
+
+---
+
+### 🔴 Critical（直接阻擋 baseline 或 KPI，M1/M2 前必修）
+
+#### C1｜Ground truth 全部為空，eval 跑不起來
+- **位置**：`tests/eval/queries.jsonl`
+- **問題描述**：30 組 `relevant_chunk_ids` 全為 `[]`，`eval.py:135` 偵測到沒有 annotated query 即 early-return，M1 baseline 根本跑不出來。
+- **白話文**：考卷發下去了但標準答案欄全空，閱卷程式看到沒答案就直接放棄打分，整個 M1 baseline 卡住。
+- **解法**：人力完成 150 筆標注（30 query × 平均 5 relevant chunk），預估 1–1.5 人天（見 §六風險區）。
+- **解法白話文**：找人把 30 題的標準答案一題一題寫進去，寫完才有得比。
+- **狀態**：✅ 完成（30 組 query 全部標注 relevant_chunk_ids，2026-04-21）
+
+#### C2｜Phase 1 baseline 從未凍結進 repo（含 schema 相容性處理）
+- **位置**：`results/`（目錄空）
+- **問題描述**：`results/phase1_baseline.json` 不存在。若等到 M1 才生，storage 已經跑過 dedup + 新 chunking，資料分布已改變，所謂 +20% KPI 變成跟新環境自己比的偽命題。另外直接 `git checkout 8fe1dbf` 跑 Phase 2 的 `eval.py` 有 **schema 相容性風險**——eval.py 是 Phase 2 新增，Phase 1 commit 的 storage 欄位可能對不上，跑起來要嘛直接爆，要嘛跑出來的數字是錯的。
+- **白話文**：「進步 20%」要跟「以前」比，但「以前」的分數從沒留底；而且現在的資料庫已經不是以前的樣子，再量等於自己騙自己。另外，直接把新考試程式搬回舊資料庫，程式和資料庫規格對不上，會出事。
+- **解法**：採最穩妥做法——在 Phase 1 commit（`8fe1dbf`）上建一個臨時 branch，把 Phase 2 的 `scripts/eval.py` cherry-pick 過去並驗證可跑後，用該 branch 跑出 baseline，再把 `results/phase1_baseline.json` commit 回 main。baseline JSON 必須內嵌 **commit hash / eval.py 版本 / storage schema 版本** 三欄以供追溯。
+- **解法白話文**：回到 Phase 1 那個時空，但把 Phase 2 的考試程式搬過去先試跑一次確定能跑，跑完把分數鎖進檔案並標明「這是用哪個版本在哪個資料庫結構下跑的」，以後才能追。
+- **狀態**：✅ 完成（results/phase1_baseline.json 已凍結，Recall@10=0.2789, nDCG@10=0.2899，2026-04-21）
+
+#### C3｜BM25 index 每次 query 都重建
+- **位置**：`storage.py:337-373, 386`
+- **問題描述**：每次 `search_chunks_bm25` 都做全表 `to_pandas()` + 全量 tokenize + 新建 `BM25Okapi`，corpus 成長後直接違反 P95 ≤ 800ms。
+- **白話文**：每次搜尋都把整個書櫃重新整理一遍才開始找書，書一多就卡死。
+- **解法**：`Storage` 加 `_bm25_cache: tuple | None = None`，只在 `add_chunks` / `cosine_dedup_session` 後 invalidate，其餘 query 直接吃 cache。
+- **解法白話文**：書櫃整理一次就記住，之後直接查；只有新增/刪書時才重整。
+- **狀態**：✅ 完成（C3 cache + invalidation 實作，2026-04-21）
+
+#### C4｜BM25 中文 tokenizer 失效（詞級斷詞，非 char-level）
+- **位置**：`storage.py:371`
+- **問題描述**：`.lower().split()` 對沒有空格的中文整句只切出一個 token，30 組基準裡 4 組中文 + 5 組中英混雜的 BM25 貢獻趨近於零，hybrid 對中文退化成 pure vector，T2「補關鍵字失準」對中文全無效。
+- **白話文**：中文沒有空格，現在的切詞靠空格切，整句中文被當成一個超長單字，關鍵字搜尋對中文幾乎沒動作。
+- **解法**：引入 `jieba`（或 `lac` / `ckip-transformers`）做**詞級斷詞**，char-level `list(text)` 只留作 fallback（套件載入失敗時）。詞典可擴充專案常見專有名詞。**不可只做 char-level split**——成語、複合詞、錯誤訊息會被拆散，IDF 被單字稀釋，等於只回血一半。驗收時中文 query 的 BM25 top-10 命中率須明顯高於 char-level baseline。
+- **解法白話文**：裝一個真的懂中文的切詞工具（jieba），讓它把句子切成有意義的詞；萬一工具壞了才退回到一個字一個字切當備援。
+- **狀態**：✅ 完成（jieba 詞級斷詞 + char fallback 實作，2026-04-21）
+
+#### C5｜Context expansion 在 rerank 之前，latency 爆表
+- **位置**：`tools.py:215-228`
+- **問題描述**：hybrid recall(50) → `_expand_context`（50×5=250 chunks）→ 全數餵給 cross-encoder，CPU 推論時間暴增 5 倍，直接違反 T6 P95 ≤ 800ms。
+- **白話文**：先把候選從 50 個擴成 250 個，再拿去做最貴的那一步，等於叫最貴的工人做最多的活。
+- **解法**：順序改為 hybrid recall(50) → cross-encoder rerank 取 top-K → 對 rerank 結果才做 sibling expansion。
+- **解法白話文**：先讓貴工人在 50 個裡挑出前 10，再擴充上下文，工作量降為 1/5。
+- **狀態**：✅ 完成（rerank 移至 expand 前，2026-04-21）
+
+#### C6｜CI 永遠綠，T7 quality gate 形同虛設（門檻硬卡 == 30）
+- **位置**：`.github/workflows/eval.yml:23, 46, 53`
+- **問題描述**：job 層和兩個 eval step 層全設 `continue-on-error: true`，eval.py exit code 1 時 CI 照樣綠燈，品質退步無人把關。
+- **白話文**：CI 裝了警報器但電線被剪掉，燈永遠亮綠，出事也不叫。
+- **解法**：加 annotated queries 數量檢查 step，**硬卡 `== 30`**（與 C1「M1 前必做」一致；不可放水到 `>= 20`，否則自打臉：C1 要求 30 筆全標，CI 卻允許 1/3 未標通過，兩處矛盾）。C1 完成後同步移除所有 `continue-on-error: true`。
+  ```yaml
+  - name: Verify annotated queries
+    run: |
+      python -c "
+      import json; lines = open('tests/eval/queries.jsonl').readlines()
+      annotated = sum(1 for l in lines if json.loads(l).get('relevant_chunk_ids'))
+      assert annotated == 30, f'Only {annotated}/30 annotated — CI blocked'
+      "
+  ```
+- **解法白話文**：加一道關卡——30 題沒全部標完就不讓過；同時把那個假裝成功的開關關掉。
+- **狀態**：✅ 完成（eval.yml 已移除 continue-on-error，硬卡 annotated == 30，2026-04-21）
+
+---
+
+### 🟠 High（影響 KPI 歸因，M3/M4 前必修）
+
+#### H1｜Chunking 改動沒觸發整庫重建
+- **位置**：`config.py:25`，`cli.py`（無 reindex 指令）
+- **問題描述**：`CHUNK_OVERLAP 50→80` 只影響新寫入，舊 chunks 仍是 50 overlap。M3 終版分數量的是新舊混合 corpus，無法歸因到 chunking 改動。交付物 #7 寫「開發期清空重建」，但 CLI 沒對應指令。
+- **白話文**：規格改了但舊資料沒重切，量出來的分數是新舊混著跑的，分不清到底是哪個改動造成的。
+- **解法**：`cli.py` 新增 `patrick reindex --wipe`（drop + recreate LanceDB tables），M3 跑 eval 前強制執行，benchmark 報告標注執行的 commit hash。
+- **解法白話文**：寫個一鍵「清庫重建」指令，M3 前按一下，整庫都用新規格切過。
+- **狀態**：✅ 完成（patrick reindex --wipe 實作，含 drop tables + scan transcripts + re-chunk + re-embed，2026-04-21）
+
+#### H2｜T6 未交付：無 latency histogram，無成本估算腳本
+- **位置**：`scripts/eval.py`（T6 對應腳本缺失）
+- **問題描述**：T6 要求 latency 直方圖 + re-embedding chunk 數 × 單價明細，`eval.py` 只輸出 `p95_latency_ms` 純量，沒有分布資料，也沒有成本估算腳本。
+- **白話文**：只給一個「最慢的 5% 多慢」的數字，沒有分布圖；也沒算過整庫重建要花多少 API 費用。
+- **解法**：(a) `eval.py --output` JSON 加 `latency_distribution` 分桶欄位；(b) 新增 `scripts/estimate_reembed_cost.py`（chunk count × embedding 單價 × rate limit）。
+- **解法白話文**：補兩樣——延遲分布圖、重建費用試算表。
+- **狀態**：✅ 完成（eval.py 加 latency_distribution 分桶 + 新增 scripts/estimate_reembed_cost.py 本地推論耗時估算，2026-04-21）
+
+#### H3｜Recency sort 在 rerank 之前，vector baseline 的 nDCG 被污染
+- **位置**：`tools.py:219`（Phase 1 舊行為，但影響 Phase 2 eval 量測）
+- **問題描述**：vector-only 模式最終輸出按時間排序而非相似度，nDCG@10 被人為壓低。hybrid 因 rerank 可覆蓋 sort，對比數字虛胖，nDCG +15% KPI 歸因不乾淨。Recall@10 不受影響（只看集合命中）。附注：eval 的 `search_direct` 刻意不跑 sibling expansion，量的是 retrieval 層，這是設計而非 bug。
+- **白話文**：baseline 被偷偷打了折，Phase 2 分數虛胖，兩者相減看起來進步很多，其實一半是假的。
+- **解法**：recency sort 移到 `formatted[:top_k]` truncation 之後，或移到 rerank 之後，避免污染 eval 量測的排序分數。
+- **解法白話文**：把「按時間排」這一步挪到最後，不要干擾打分。
+- **狀態**：✅ 完成（recency sort 移至 top_k truncation/rerank 之後，2026-04-21）
+
+#### H4｜`BM25_WEIGHT` / `VECTOR_WEIGHT` 是死常數
+- **位置**：`config.py:41-42`
+- **問題描述**：`search_chunks_hybrid` 的 RRF fusion 只用 `RRF_K`，完全沒讀這兩個 weight，誤導後續調參人員以為 fusion 有加權。
+- **白話文**：config 裡放了兩個旋鈕看起來可以調，實際上沒接線，轉了沒用。
+- **解法**：擇一——(a) 刪除這兩行；(b) 實作 weighted RRF：`BM25_WEIGHT / (rrf_k + bm25_rank + 1) + VECTOR_WEIGHT / (rrf_k + vec_rank + 1)`。若 M3 要跑 grid search 建議選 (b)。
+- **解法白話文**：要嘛拆掉那兩個假旋鈕，要嘛接上線讓它真的能調。
+- **狀態**：✅ 完成（實作 weighted RRF：BM25_WEIGHT/(k+br+1) + VECTOR_WEIGHT/(k+vr+1)，2026-04-21）
+
+---
+
+### 🟡 Medium（影響量測準確度，順手或文件層級）
+
+#### Med1｜P95 計算 off-by-one
+- **位置**：`eval.py:185`
+- **問題描述**：`latencies[int(0.95 * len(latencies)) - 1]` → 30 queries 時取 index 27（P93），非 P95。
+- **白話文**：宣稱量 P95 其實量到 P93，小偏差但會讓報告失準。
+- **解法**：改為 `float(np.percentile(latencies, 95))`（numpy 已為間接依賴）。
+- **解法白話文**：用 numpy 內建的百分位函數，不要自己算。
+- **狀態**：✅ 完成（改用 np.percentile，2026-04-21）
+
+#### Med2｜eval path 與 production path 差異未說明
+- **位置**：`tests/eval/README.md`
+- **問題描述**：eval 的 `search_direct` 不走 `_expand_context`，production 的 `memory_deep_search` 走。差異合理（eval 量 retrieval 層，expansion 是 presentation layer），但文件未明文化，ground truth 標注者容易誤解。
+- **白話文**：評測用的搜尋跟線上用的搜尋流程不一樣，這是故意的，但沒寫清楚，標注的人會標錯。
+- **解法**：`tests/eval/README.md` 加一段說明：ground truth 標注的是 retrieval top-K 的 chunk_id，**不含 sibling expansion**；eval 刻意不跑 expand 以獨立量測檢索品質。
+- **解法白話文**：在 README 加一段「標準答案只標原始檢索結果，不要標擴充的上下文」。
+- **狀態**：✅ 完成（README 補充 eval vs production 差異說明，2026-04-21）
+
+---
 

@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 # ── Path setup ───────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -182,7 +184,29 @@ async def run_eval(
     avg_ndcg = sum(r[f"ndcg@{top_k}"] for r in per_query) / n
     avg_mrr = sum(r["mrr"] for r in per_query) / n
     latencies = sorted(r["latency_ms"] for r in per_query)
-    p95_ms = latencies[int(0.95 * len(latencies)) - 1] if latencies else 0.0
+    p95_ms = float(np.percentile(latencies, 95)) if latencies else 0.0
+
+    # ── Latency distribution (histogram buckets) ────────────────────────────
+    bucket_edges = [0, 50, 100, 200, 400, 800, float("inf")]
+    bucket_labels = ["0-50ms", "50-100ms", "100-200ms", "200-400ms", "400-800ms", ">800ms"]
+    bucket_counts = [0] * len(bucket_labels)
+    for lat in latencies:
+        for i in range(len(bucket_edges) - 1):
+            if bucket_edges[i] <= lat < bucket_edges[i + 1]:
+                bucket_counts[i] += 1
+                break
+
+    latency_distribution = {
+        "buckets": [
+            {"range": label, "count": count}
+            for label, count in zip(bucket_labels, bucket_counts)
+        ],
+        "min_ms": round(latencies[0], 1) if latencies else 0.0,
+        "max_ms": round(latencies[-1], 1) if latencies else 0.0,
+        "median_ms": round(float(np.percentile(latencies, 50)), 1) if latencies else 0.0,
+        "p95_ms": round(p95_ms, 1),
+        "mean_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
+    }
 
     metrics = {
         f"recall@{top_k}": round(avg_recall, 4),
@@ -190,6 +214,7 @@ async def run_eval(
         "mrr": round(avg_mrr, 4),
         "p95_latency_ms": p95_ms,
         "total_latency_ms": total_ms,
+        "latency_distribution": latency_distribution,
     }
 
     return {

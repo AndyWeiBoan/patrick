@@ -1,0 +1,316 @@
+{
+  "mode": "vector",
+  "top_k": 10,
+  "total_queries": 30,
+  "annotated": 30,
+  "skipped": 0,
+  "metrics": {
+    "recall@10": 0.2789,
+    "ndcg@10": 0.2899,
+    "mrr": 0.4767,
+    "p95_latency_ms": 81.35,
+    "total_latency_ms": 4843.5
+  },
+  "per_query": [
+    {
+      "id": "q001",
+      "query": "patrick project phase 1 goals",
+      "lang": "en",
+      "category": "project_overview",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 3329.7
+    },
+    {
+      "id": "q002",
+      "query": "BM25 hybrid search implementation",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.2,
+      "ndcg@10": 0.098,
+      "mrr": 0.1,
+      "latency_ms": 41.6
+    },
+    {
+      "id": "q003",
+      "query": "LanceDB schema turn_chunks fields",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.25,
+      "ndcg@10": 0.2463,
+      "mrr": 0.5,
+      "latency_ms": 51.3
+    },
+    {
+      "id": "q004",
+      "query": "embedding model choice fastembed multilingual",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.2,
+      "ndcg@10": 0.1696,
+      "mrr": 0.3333,
+      "latency_ms": 44.6
+    },
+    {
+      "id": "q005",
+      "query": "cross-encoder rerank latency budget",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.3333,
+      "ndcg@10": 0.2021,
+      "mrr": 0.25,
+      "latency_ms": 48.0
+    },
+    {
+      "id": "q006",
+      "query": "cosine dedup threshold 0.95 rationale",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 48.1
+    },
+    {
+      "id": "q007",
+      "query": "session summary centroid vector calculation",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.6,
+      "ndcg@10": 0.7227,
+      "mrr": 1.0,
+      "latency_ms": 53.8
+    },
+    {
+      "id": "q008",
+      "query": "memory_save disabled reason",
+      "lang": "en",
+      "category": "decision",
+      "recall@10": 0.2,
+      "ndcg@10": 0.1131,
+      "mrr": 0.1429,
+      "latency_ms": 47.5
+    },
+    {
+      "id": "q009",
+      "query": "eval harness frozen benchmark 30 queries",
+      "lang": "en",
+      "category": "process",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 57.1
+    },
+    {
+      "id": "q010",
+      "query": "RRF reciprocal rank fusion formula",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.5,
+      "ndcg@10": 0.6131,
+      "mrr": 1.0,
+      "latency_ms": 62.0
+    },
+    {
+      "id": "q011",
+      "query": "patrick 專案 phase 2 計畫",
+      "lang": "zh",
+      "category": "project_overview",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 51.0
+    },
+    {
+      "id": "q012",
+      "query": "向量搜尋語意漂移問題",
+      "lang": "zh",
+      "category": "technical",
+      "recall@10": 0.25,
+      "ndcg@10": 0.1301,
+      "mrr": 0.1429,
+      "latency_ms": 49.3
+    },
+    {
+      "id": "q013",
+      "query": "session hook 觸發流程",
+      "lang": "zh",
+      "category": "technical",
+      "recall@10": 0.4,
+      "ndcg@10": 0.2904,
+      "mrr": 0.3333,
+      "latency_ms": 52.4
+    },
+    {
+      "id": "q014",
+      "query": "記憶系統去重方法",
+      "lang": "zh",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 53.1
+    },
+    {
+      "id": "q015",
+      "query": "phase 3 跨 agent 記憶一致性延後原因",
+      "lang": "zh",
+      "category": "decision",
+      "recall@10": 0.6667,
+      "ndcg@10": 0.7654,
+      "mrr": 1.0,
+      "latency_ms": 52.4
+    },
+    {
+      "id": "q016",
+      "query": "chunk_size 400 tokens overlap 80",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.2,
+      "ndcg@10": 0.3392,
+      "mrr": 1.0,
+      "latency_ms": 46.2
+    },
+    {
+      "id": "q017",
+      "query": "mcp server tools registration",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.2,
+      "ndcg@10": 0.214,
+      "mrr": 0.5,
+      "latency_ms": 44.8
+    },
+    {
+      "id": "q018",
+      "query": "session_summaries Layer 1 coarse filter",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.6,
+      "ndcg@10": 0.6399,
+      "mrr": 1.0,
+      "latency_ms": 52.2
+    },
+    {
+      "id": "q019",
+      "query": "text_hash SHA256 exact dedup",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 52.9
+    },
+    {
+      "id": "q020",
+      "query": "observer.py batch worker asyncio queue",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 50.8
+    },
+    {
+      "id": "q021",
+      "query": "benchmark KPI Recall@10 nDCG MRR definition",
+      "lang": "en",
+      "category": "metrics",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 49.5
+    },
+    {
+      "id": "q022",
+      "query": "re-embedding cost estimate production migration",
+      "lang": "en",
+      "category": "process",
+      "recall@10": 0.75,
+      "ndcg@10": 0.6715,
+      "mrr": 1.0,
+      "latency_ms": 44.9
+    },
+    {
+      "id": "q023",
+      "query": "TOP_K_SESSIONS TOP_K_CHUNKS config values",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.6667,
+      "ndcg@10": 0.7654,
+      "mrr": 1.0,
+      "latency_ms": 53.3
+    },
+    {
+      "id": "q024",
+      "query": "memory_deep_search two layer retrieval",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 46.0
+    },
+    {
+      "id": "q025",
+      "query": "patrick CLI init start setup doctor commands",
+      "lang": "en",
+      "category": "usage",
+      "recall@10": 0.6,
+      "ndcg@10": 0.674,
+      "mrr": 1.0,
+      "latency_ms": 48.7
+    },
+    {
+      "id": "q026",
+      "query": "bge-reranker vs mmarco cross-encoder comparison",
+      "lang": "en",
+      "category": "decision",
+      "recall@10": 0.25,
+      "ndcg@10": 0.3904,
+      "mrr": 1.0,
+      "latency_ms": 47.0
+    },
+    {
+      "id": "q027",
+      "query": "fastembed ONNX runtime CPU inference",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.4,
+      "ndcg@10": 0.4372,
+      "mrr": 1.0,
+      "latency_ms": 51.9
+    },
+    {
+      "id": "q028",
+      "query": "session end stop hook centroid update",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.6,
+      "ndcg@10": 0.6844,
+      "mrr": 1.0,
+      "latency_ms": 81.8
+    },
+    {
+      "id": "q029",
+      "query": "T4 session summary deferred phase 3 reason",
+      "lang": "en",
+      "category": "decision",
+      "recall@10": 0.5,
+      "ndcg@10": 0.5294,
+      "mrr": 1.0,
+      "latency_ms": 50.1
+    },
+    {
+      "id": "q030",
+      "query": "BM25 k1 b parameter grid search tuning",
+      "lang": "en",
+      "category": "technical",
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 80.8
+    }
+  ]
+}

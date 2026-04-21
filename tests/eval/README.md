@@ -41,6 +41,16 @@ Each query has a `relevant_chunk_ids` field that must be populated by a human an
 - **nDCG@10**: normalized discounted cumulative gain at rank 10 (rewards top-ranked hits)  
 - **MRR**: mean reciprocal rank of the first relevant result
 
+## Important: what eval measures vs. what production returns
+
+`scripts/eval.py` calls `search_direct`, which **does NOT run `_expand_context`** (sibling expansion).
+Production `memory_deep_search` does run sibling expansion after retrieval.
+
+This is intentional: eval measures the **retrieval layer** in isolation (did the right chunk_id rank in top-K?), not the presentation layer (did we fetch its neighbours?).
+
+**Annotation rule**: when populating `relevant_chunk_ids`, record the actual `chunk_id` of the matching chunk, **not** the chunk_ids of sibling/context chunks that happen to be returned alongside it.
+If the relevant text is split across multiple chunks of the same turn, list all their individual chunk_ids.
+
 ## How to run
 
 ```bash

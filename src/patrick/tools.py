@@ -211,24 +211,44 @@ async def memory_deep_search(
             else storage.search_chunks(q_vec, top_k=top_k)
         )
 
-    # Context expansion: for each hit, pull all sibling chunks from same turn
-    expanded = _expand_context(chunks)
-    formatted = _format_chunks(expanded)
-
-    # Sort by recency (newest first) so Claude naturally sees the most recent info first.
-    formatted.sort(key=lambda c: c.get("created_at") or "", reverse=True)
-
-    # Optional cross-encoder rerank (hybrid mode only)
+    # Optional cross-encoder rerank (hybrid mode only).
+    # C5: rerank on the compact recall set (top-RECALL_N) BEFORE context expansion,
+    # so the cross-encoder sees 50 candidates instead of 50×5=250.
     rerank_applied = False
-    if mode == "hybrid" and RERANK_ENABLED and formatted:
-        formatted = await provider.rerank_async(
+    if mode == "hybrid" and RERANK_ENABLED and chunks:
+        pre_rerank = _format_chunks(chunks)
+        reranked = await provider.rerank_async(
             query=query,
-            candidates=formatted,
+            candidates=pre_rerank,
             top_k=top_k,
         )
         rerank_applied = True
+        # Context expansion: expand only the reranked top-K, not all recall candidates
+        seen_turn_ids: set[str] = set()
+        expanded_formatted: list[dict] = []
+        for fmt_chunk in reranked:
+            turn_id = fmt_chunk.get("turn_id")
+            if not turn_id:
+                expanded_formatted.append(fmt_chunk)
+                continue
+            if turn_id in seen_turn_ids:
+                continue
+            seen_turn_ids.add(turn_id)
+            siblings = storage.get_turn_chunks(turn_id)
+            if siblings:
+                expanded_formatted.extend(_format_chunks(siblings))
+            else:
+                expanded_formatted.append(fmt_chunk)
+        formatted = expanded_formatted
     else:
-        formatted = formatted[:top_k]
+        # Vector-only: expand context on all recall candidates, then truncate
+        expanded = _expand_context(chunks)
+        formatted = _format_chunks(expanded)[:top_k]
+
+    # Sort by recency (newest first) so Claude naturally sees the most recent info first.
+    # NOTE: intentionally placed AFTER top_k truncation / rerank so that eval can measure
+    # clean semantic-ranking scores (nDCG@10) without recency order polluting the baseline.
+    formatted.sort(key=lambda c: c.get("created_at") or "", reverse=True)
 
     latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 

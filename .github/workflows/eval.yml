@@ -18,10 +18,6 @@ jobs:
   eval:
     name: Run eval benchmark
     runs-on: ubuntu-latest
-    # Only runs once ground truth has been annotated
-    # (eval.py exits with code 1 if no annotated queries)
-    continue-on-error: true
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,13 +33,20 @@ jobs:
           pip install -e ".[eval]"
           pip install rank-bm25 sentence-transformers
 
+      - name: Verify annotated queries
+        run: |
+          python -c "
+          import json; lines = open('tests/eval/queries.jsonl').readlines()
+          annotated = sum(1 for l in lines if json.loads(l).get('relevant_chunk_ids'))
+          assert annotated == 30, f'Only {annotated}/30 annotated — CI blocked'
+          "
+
       - name: Run eval (vector mode)
         run: |
           python scripts/eval.py \
             --mode vector \
             --output results/ci_vector_$(git rev-parse --short HEAD).json \
             --verbose
-        continue-on-error: true
 
       - name: Run eval (hybrid mode)
         run: |
@@ -51,7 +54,6 @@ jobs:
             --mode hybrid \
             --output results/ci_hybrid_$(git rev-parse --short HEAD).json \
             --verbose
-        continue-on-error: true
 
       - name: Upload results artifact
         uses: actions/upload-artifact@v4

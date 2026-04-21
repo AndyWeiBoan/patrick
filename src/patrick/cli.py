@@ -395,5 +395,221 @@ def doctor() -> None:
         raise typer.Exit(1)
 
 
+@app.command()
+def reindex(
+    wipe: bool = typer.Option(
+        False,
+        "--wipe",
+        help="Drop and recreate LanceDB tables before reindexing.",
+        is_flag=True,
+    ),
+) -> None:
+    """Re-index all historical transcripts from ~/.claude/projects/.
+
+    With --wipe: drops and recreates the LanceDB tables first (clean slate).
+    Reads every transcript JSONL, re-chunks with the current chunking config
+    (CHUNK_SIZE=400, CHUNK_OVERLAP=80), re-embeds, and stores all turns.
+    """
+    import asyncio
+    import hashlib
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    typer.secho("\nPatrick reindex", fg=typer.colors.BRIGHT_CYAN, bold=True)
+    typer.echo("=" * 50)
+
+    # ── Init storage + embedding provider ─────────────────────────────────────
+    try:
+        import lancedb
+        import pyarrow as pa
+        from .config import DATA_DIR
+        from .storage import storage, _SESSION_SCHEMA, _CHUNK_SCHEMA
+        from .embedding import provider
+    except ImportError as e:
+        typer.secho(f"✗ Import error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # ── Optional wipe: drop and recreate tables ────────────────────────────────
+    if wipe:
+        typer.echo("\n[1/4] Wiping LanceDB tables...")
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            db = lancedb.connect(str(DATA_DIR))
+            for table_name in ("session_summaries", "turn_chunks"):
+                if table_name in db.table_names():
+                    db.drop_table(table_name)
+                    typer.secho(f"  ✓ Dropped table: {table_name}", fg=typer.colors.YELLOW)
+                db.create_table(table_name, schema=(_SESSION_SCHEMA if table_name == "session_summaries" else _CHUNK_SCHEMA))
+                typer.secho(f"  ✓ Recreated table: {table_name}", fg=typer.colors.GREEN)
+            # Force the singleton to re-initialize with fresh tables
+            storage._initialized = False
+            storage._bm25_cache.clear()
+        except Exception as e:
+            typer.secho(f"✗ Wipe failed: {e}", fg=typer.colors.RED)
+            raise typer.Exit(1)
+    else:
+        typer.echo("\n[1/4] Skipping wipe (use --wipe to drop and recreate tables)")
+
+    # ── Initialize storage and embedding provider ──────────────────────────────
+    typer.echo("\n[2/4] Initializing storage and embedding model...")
+    try:
+        storage.initialize()
+        provider.initialize()
+        typer.secho("  ✓ Storage and embedding provider ready", fg=typer.colors.GREEN)
+    except Exception as e:
+        typer.secho(f"✗ Initialization failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # ── Discover transcript files ──────────────────────────────────────────────
+    typer.echo("\n[3/4] Scanning ~/.claude/projects/ for transcripts...")
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        typer.secho(
+            f"  ✗ Directory not found: {projects_dir}", fg=typer.colors.RED
+        )
+        raise typer.Exit(1)
+
+    MAX_TEXT_CHARS = 8_000
+
+    def _extract_turns_from_transcript(path: Path) -> list[tuple[str, str]]:
+        """Parse a transcript JSONL and return [(role, text), ...] pairs.
+
+        Handles both:
+        - User turns: entry["message"]["role"] == "user" + content[].text blocks
+        - Assistant turns: entry["message"]["role"] == "assistant" + content[].text blocks
+        """
+        try:
+            lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        except Exception:
+            return []
+
+        seen_ids: set[str] = set()
+        turns: list[tuple[str, str]] = []
+
+        for line in lines:
+            try:
+                entry = _json.loads(line)
+            except Exception:
+                continue
+
+            msg = entry.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+
+            msg_id = msg.get("id", "")
+            if msg_id and msg_id in seen_ids:
+                continue
+
+            content = msg.get("content", [])
+            if isinstance(content, str):
+                # Some user turns store content as a plain string
+                text = content.strip()
+                if text:
+                    if msg_id:
+                        seen_ids.add(msg_id)
+                    turns.append((role, text[:MAX_TEXT_CHARS]))
+                continue
+
+            if not isinstance(content, list):
+                continue
+
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text", "").strip()
+                    if t:
+                        parts.append(t)
+
+            if parts:
+                if msg_id:
+                    seen_ids.add(msg_id)
+                turns.append((role, "\n\n".join(parts)[:MAX_TEXT_CHARS]))
+
+        return turns
+
+    # Collect all transcript files
+    transcript_files: list[Path] = sorted(projects_dir.rglob("*.jsonl"))
+    if not transcript_files:
+        typer.secho(
+            f"  ~ No .jsonl transcript files found under {projects_dir}",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("  Nothing to reindex.")
+        return
+
+    typer.echo(f"  Found {len(transcript_files)} transcript file(s)")
+
+    # ── Process each transcript ────────────────────────────────────────────────
+    typer.echo("\n[4/4] Chunking, embedding, and storing...")
+
+    total_files = 0
+    total_turns = 0
+    total_chunks = 0
+    skipped_empty = 0
+
+    async def _process_all() -> None:
+        nonlocal total_files, total_turns, total_chunks, skipped_empty
+
+        for transcript_path in transcript_files:
+            # Derive a stable session_id from the transcript filename stem
+            # (Claude stores one session per .jsonl file named by session UUID)
+            stem = transcript_path.stem
+            # Use the stem directly if it looks like a UUID, else hash it
+            try:
+                _uuid.UUID(stem)
+                session_id = stem
+            except ValueError:
+                session_id = str(_uuid.UUID(
+                    hashlib.md5(str(transcript_path).encode()).hexdigest()
+                ))
+
+            turns = _extract_turns_from_transcript(transcript_path)
+            if not turns:
+                skipped_empty += 1
+                continue
+
+            total_files += 1
+            file_chunks_written = 0
+
+            for role, text in turns:
+                total_turns += 1
+                chunks = provider.chunk_text(text)
+                vectors = provider.embed_sync(chunks)
+                records = storage.make_chunk_records(
+                    texts=chunks,
+                    vectors=vectors,
+                    session_id=session_id,
+                    role=role,
+                    source="reindex",
+                    source_file=str(transcript_path),
+                )
+                if records:
+                    storage.add_chunks(records)
+                    file_chunks_written += len(records)
+                    total_chunks += len(records)
+
+            # Compute centroid for this session after all its turns are stored
+            if file_chunks_written > 0:
+                storage.compute_and_upsert_centroid(session_id)
+
+            typer.echo(
+                f"  {transcript_path.name}: {len(turns)} turns → {file_chunks_written} chunks"
+            )
+
+    asyncio.run(_process_all())
+
+    typer.echo("")
+    typer.secho("Reindex complete.", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Transcripts processed : {total_files}")
+    typer.echo(f"  Transcripts skipped   : {skipped_empty} (empty/unreadable)")
+    typer.echo(f"  Turns processed       : {total_turns}")
+    typer.echo(f"  Chunks written        : {total_chunks}")
+
+
 if __name__ == "__main__":
     app()

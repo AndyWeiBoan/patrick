@@ -1,8 +1,8 @@
 """LanceDB storage layer — session_summaries + turn_chunks tables.
 
 Phase 2 additions:
-- BM25Index: in-memory BM25 index over all turn_chunks (rebuilt on demand)
-- search_chunks_bm25(): BM25 keyword search
+- BM25Index: in-memory BM25 index over all turn_chunks (cached, invalidated on write)
+- search_chunks_bm25(): BM25 keyword search (jieba tokenizer for CJK)
 - search_chunks_hybrid(): RRF fusion of vector + BM25 results
 - cosine_dedup_session(): remove semantically-duplicate chunks within a session
 """
@@ -20,15 +20,48 @@ import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
+
+# ── BM25 tokenizer ────────────────────────────────────────────────────────────
+
+def _tokenize_for_bm25(text: str) -> list[str]:
+    """Tokenize text for BM25 index and query.
+
+    Uses jieba for Chinese word segmentation, which correctly handles:
+    - Pure Chinese text (成語、複合詞)
+    - Mixed CJK/Latin/code text
+    - Error messages and identifiers
+
+    Falls back to char-level split only when jieba is not installed.
+    Char-level is suboptimal (idioms get fragmented, IDF diluted) but still
+    far better than whitespace-only split that treats whole CJK sentences as
+    a single token.
+
+    IMPORTANT: query tokenization in search_chunks_bm25 must use the same
+    function so index tokens and query tokens are in the same token space.
+    """
+    try:
+        import jieba  # type: ignore[import]
+        # cut() returns a generator; filter empty/whitespace-only tokens
+        return [tok for tok in jieba.cut(text.lower()) if tok.strip()]
+    except ImportError:
+        logger.warning(
+            "jieba not installed — falling back to char-level BM25 tokenization. "
+            "Chinese keyword search will be degraded. Run: pip install jieba"
+        )
+        return list(text.lower())  # char-level fallback
+
+
 from .config import (
     BM25_B,
     BM25_K1,
+    BM25_WEIGHT,
     COSINE_DEDUP_THRESHOLD,
     DATA_DIR,
     MIN_SESSION_SCORE,
     RRF_K,
     TOP_K_CHUNKS,
     TOP_K_SESSIONS,
+    VECTOR_WEIGHT,
 )
 from .embedding import provider
 
@@ -78,12 +111,21 @@ class Storage:
     """Manages LanceDB connection and all table operations."""
 
     _instance: "Storage | None" = None
+    # BM25 cache: maps frozenset(session_ids) | None → (BM25Okapi, list[dict])
+    # Invalidated on any write (add_chunks, cosine_dedup_session delete, reindex --wipe).
+    _bm25_cache: dict
 
     def __new__(cls) -> "Storage":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
+            cls._instance._bm25_cache = {}
         return cls._instance
+
+    def _invalidate_bm25_cache(self) -> None:
+        """Clear the BM25 index cache. Call after any write that changes turn_chunks."""
+        self._bm25_cache.clear()
+        logger.debug("BM25 cache invalidated")
 
     def initialize(self) -> None:
         """Open DB and ensure tables exist. Called once at server start."""
@@ -302,6 +344,8 @@ class Storage:
         assert self._initialized
         if not chunks:
             return
+        # C3 fix: invalidate BM25 cache before write so next query rebuilds fresh index.
+        self._invalidate_bm25_cache()
         self._chunks.add(pa.table({
             "chunk_id": [c["chunk_id"] for c in chunks],
             "session_id": [c["session_id"] for c in chunks],
@@ -337,13 +381,22 @@ class Storage:
     def _build_bm25_index(
         self, session_ids: list[str] | None = None
     ) -> tuple["Any", list[dict]]:
-        """Build an in-memory BM25 index over turn_chunks.
+        """Return a cached BM25 index over turn_chunks, building it on first call.
 
         Returns (BM25Okapi, [chunk_dicts_in_index_order]).
         The chunk list preserves the position mapping needed to look up scores.
 
+        Cache key: frozenset(session_ids) for filtered queries, None for global.
+        Cache is invalidated by _invalidate_bm25_cache() whenever turn_chunks change
+        (add_chunks, cosine_dedup_session delete, reindex --wipe).
+
         session_ids: if provided, index only those sessions (faster, more focused).
         """
+        cache_key = frozenset(session_ids) if session_ids else None
+        if cache_key in self._bm25_cache:
+            logger.debug("BM25 cache hit (key=%s)", cache_key)
+            return self._bm25_cache[cache_key]
+
         try:
             from rank_bm25 import BM25Okapi  # type: ignore[import]
         except ImportError as e:
@@ -367,9 +420,13 @@ class Storage:
             return None, []
 
         chunks = df.to_dict(orient="records")
-        # Tokenize: lowercase whitespace split (language-agnostic enough for hybrid)
-        tokenized = [str(c.get("text", "")).lower().split() for c in chunks]
+        # C4 fix: use jieba tokenizer (word-level for CJK, char-level fallback).
+        # Must match the tokenizer used in search_chunks_bm25 for query tokens.
+        tokenized = [_tokenize_for_bm25(str(c.get("text", ""))) for c in chunks]
         bm25 = BM25Okapi(tokenized, k1=BM25_K1, b=BM25_B)
+
+        self._bm25_cache[cache_key] = (bm25, chunks)
+        logger.debug("BM25 index built and cached (key=%s, chunks=%d)", cache_key, len(chunks))
         return bm25, chunks
 
     def search_chunks_bm25(
@@ -387,7 +444,8 @@ class Storage:
         if bm25 is None:
             return []
 
-        query_tokens = query.lower().split()
+        # C4 fix: use same tokenizer as index build — jieba for CJK, char fallback.
+        query_tokens = _tokenize_for_bm25(query)
         scores = bm25.get_scores(query_tokens)
 
         # Pair (score, chunk) and sort descending
@@ -451,16 +509,17 @@ class Storage:
             if cid and cid not in all_ids:
                 all_ids[cid] = c
 
-        # Compute RRF score: sum of 1/(k + rank) for each list where chunk appears
+        # Compute weighted RRF score:
+        #   VECTOR_WEIGHT / (k + vec_rank + 1) + BM25_WEIGHT / (k + bm25_rank + 1)
         fused: list[dict] = []
         for cid, chunk in all_ids.items():
             vr = vec_rank.get(cid)
             br = bm25_rank.get(cid)
             rrf_score = 0.0
             if vr is not None:
-                rrf_score += 1.0 / (rrf_k + vr + 1)
+                rrf_score += VECTOR_WEIGHT / (rrf_k + vr + 1)
             if br is not None:
-                rrf_score += 1.0 / (rrf_k + br + 1)
+                rrf_score += BM25_WEIGHT / (rrf_k + br + 1)
             fused.append({
                 **chunk,
                 "_hybrid_score": rrf_score,
@@ -531,6 +590,8 @@ class Storage:
         try:
             id_list = ", ".join(f"'{cid}'" for cid in drop_ids)
             self._chunks.delete(f"chunk_id IN ({id_list})")
+            # C3 fix: corpus changed — invalidate BM25 cache.
+            self._invalidate_bm25_cache()
             logger.info(
                 "cosine_dedup: session=%s kept=%d dropped=%d",
                 session_id, len(keep_ids), len(drop_ids),
