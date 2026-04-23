@@ -17,8 +17,9 @@ EMBEDDING_MODEL_FASTEMBED: str = "sentence-transformers/paraphrase-multilingual-
 EMBEDDING_TOKENIZER_HF: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 # Upgrade options (change one line, restart server):
-# "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"  (768 dim, 1 GB)
-# "intfloat/multilingual-e5-large"                               (1024 dim, 2.24 GB)
+# "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"  (768 dim, 1 GB, needs reindex)
+# "intfloat/multilingual-e5-large"                               (1024 dim, 2.24 GB, needs reindex)
+# NOTE: intfloat/multilingual-e5-small is NOT supported in fastembed
 
 VECTOR_DIM: int = 384          # matches paraphrase-multilingual-MiniLM-L12-v2
 CHUNK_SIZE: int = 400          # tokens per chunk
@@ -52,3 +53,10 @@ RERANK_ENABLED: bool = True    # global switch; set False to skip rerank & measu
 
 # ── Phase 2: Deduplication ────────────────────────────────────────────────────
 COSINE_DEDUP_THRESHOLD: float = 0.95  # session-level semantic dedup threshold
+
+# ── Phase 3: Time-decay search ────────────────────────────────────────────────
+# Controls recency weighting in search_chunks_with_recency() (use_recency=True).
+# Score = hybrid_score * exp(-age_days / TIME_DECAY_HALFLIFE_DAYS)
+# At halflife_days age → score halved; at 2× halflife → quartered.
+TIME_DECAY_HALFLIFE_DAYS: int = 30   # half-life in days; smaller = prefer newer memories more
+RECENCY_BLEND: float = 1.0           # recency influence (0=ignore time, 1=full decay applied)

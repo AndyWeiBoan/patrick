@@ -84,6 +84,14 @@ async def _process_item(item: dict) -> None:
     if not text or not session_id:
         return
 
+    # Derive hook_type from hook name for chunk classification (T8)
+    _HOOK_TYPE_MAP = {
+        "prompt-submit": "user_prompt",
+        "post-tool-use": "tool_use",
+        "stop-text": "assistant_text",
+    }
+    hook_type: str = _HOOK_TYPE_MAP.get(hook, "hook")
+
     # Chunk text (token-aware)
     chunks = provider.chunk_text(text)
 
@@ -97,6 +105,7 @@ async def _process_item(item: dict) -> None:
         session_id=session_id,
         role=role,
         source=source,
+        hook_type=hook_type,
     )
     if records:
         storage.add_chunks(records)

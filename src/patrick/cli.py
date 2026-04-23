@@ -432,16 +432,20 @@ def reindex(
 
     # ── Optional wipe: drop and recreate tables ────────────────────────────────
     if wipe:
-        typer.echo("\n[1/4] Wiping LanceDB tables...")
+        typer.echo("\n[1/4] Wiping LanceDB data directory...")
+        import shutil
         try:
+            # Nuclear wipe: remove the entire data directory and recreate.
+            # LanceDB's drop_table can fail with stale .lance fragments after
+            # a crash, so a full directory removal is the only reliable path.
+            if DATA_DIR.exists():
+                shutil.rmtree(DATA_DIR)
+                typer.secho(f"  ✓ Removed {DATA_DIR}", fg=typer.colors.YELLOW)
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             db = lancedb.connect(str(DATA_DIR))
-            for table_name in ("session_summaries", "turn_chunks"):
-                if table_name in db.table_names():
-                    db.drop_table(table_name)
-                    typer.secho(f"  ✓ Dropped table: {table_name}", fg=typer.colors.YELLOW)
-                db.create_table(table_name, schema=(_SESSION_SCHEMA if table_name == "session_summaries" else _CHUNK_SCHEMA))
-                typer.secho(f"  ✓ Recreated table: {table_name}", fg=typer.colors.GREEN)
+            db.create_table("session_summaries", schema=_SESSION_SCHEMA)
+            db.create_table("turn_chunks", schema=_CHUNK_SCHEMA)
+            typer.secho("  ✓ Recreated empty tables", fg=typer.colors.GREEN)
             # Force the singleton to re-initialize with fresh tables
             storage._initialized = False
             storage._bm25_cache.clear()
@@ -555,7 +559,9 @@ def reindex(
     async def _process_all() -> None:
         nonlocal total_files, total_turns, total_chunks, skipped_empty
 
-        for transcript_path in transcript_files:
+        sessions_to_centroid: list[str] = []
+
+        for idx, transcript_path in enumerate(transcript_files):
             # Derive a stable session_id from the transcript filename stem
             # (Claude stores one session per .jsonl file named by session UUID)
             stem = transcript_path.stem
@@ -587,19 +593,31 @@ def reindex(
                     role=role,
                     source="reindex",
                     source_file=str(transcript_path),
+                    hook_type="reindex",
                 )
                 if records:
                     storage.add_chunks(records)
                     file_chunks_written += len(records)
                     total_chunks += len(records)
 
-            # Compute centroid for this session after all its turns are stored
             if file_chunks_written > 0:
-                storage.compute_and_upsert_centroid(session_id)
+                sessions_to_centroid.append(session_id)
 
-            typer.echo(
-                f"  {transcript_path.name}: {len(turns)} turns → {file_chunks_written} chunks"
-            )
+            # Progress indicator every 100 files
+            if (idx + 1) % 100 == 0:
+                typer.echo(f"  ... processed {idx + 1}/{len(transcript_files)} files ({total_chunks} chunks so far)")
+
+        # Deferred centroid computation: run after ALL chunks are stored to avoid
+        # LanceDB merge_insert fragmentation under sustained write load.
+        if sessions_to_centroid:
+            typer.echo(f"\n  Computing centroids for {len(sessions_to_centroid)} sessions...")
+            for i, sid in enumerate(sessions_to_centroid):
+                try:
+                    storage.compute_and_upsert_centroid(sid)
+                except Exception as e:
+                    typer.secho(f"  ⚠ Centroid failed for {sid}: {e}", fg=typer.colors.YELLOW)
+                if (i + 1) % 100 == 0:
+                    typer.echo(f"  ... centroids: {i + 1}/{len(sessions_to_centroid)}")
 
     asyncio.run(_process_all())
 
@@ -609,6 +627,32 @@ def reindex(
     typer.echo(f"  Transcripts skipped   : {skipped_empty} (empty/unreadable)")
     typer.echo(f"  Turns processed       : {total_turns}")
     typer.echo(f"  Chunks written        : {total_chunks}")
+
+
+@app.command()
+def clear(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
+) -> None:
+    """Delete ALL stored memories (irreversible).
+
+    Drops and recreates the LanceDB tables. Cannot be undone.
+    """
+    from .storage import storage
+
+    if not yes:
+        confirmed = typer.confirm(
+            "⚠️  This will permanently delete ALL memories. Are you sure?"
+        )
+        if not confirmed:
+            raise typer.Abort()
+
+    typer.echo("Clearing all memories...")
+    try:
+        storage.reset_database()
+        typer.secho("✓ All memories cleared.", fg=typer.colors.GREEN)
+    except Exception as e:
+        typer.secho(f"✗ Clear failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

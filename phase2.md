@@ -193,6 +193,13 @@
 - **怎麼驗收**：任意乾淨環境 clone → 一條指令 → 分數與報告上 commit 數值一致（±容忍誤差）。
 - **為什麼這樣驗**：可重現性是科學化調參的前提，不可重現的 20% 提升沒有價值。
 
+### T8｜`turn_chunks` 補 `hook_type` 欄位（資料品質）
+- **為什麼做**：目前 `turn_chunks` 只有 `source: "hook"` 標記，所有 hook 觸發的寫入（tool call read file、bash 執行、assistant text）全混在一起，查詢時無法過濾掉 tool call 雜訊。這會讓召回結果夾帶大量低語意價值的 chunk，直接拖低 Recall@10 / nDCG@10。
+- **怎麼做**：schema 新增 `hook_type: str` 欄位，寫入時依來源標記（例如 `"assistant_text"` / `"tool_call_read"` / `"tool_call_bash"` / `"tool_result"` 等），`memory_search` / BM25 / hybrid 查詢時可加 `hook_type filter`。
+- **怎麼驗收**：(a) 新寫入的 chunk 都有非空 `hook_type`；(b) `memory_search(hook_type="assistant_text")` 能成功過濾，結果不含 tool call chunk；(c) eval harness 加 filter 後 Recall@10 不退步（基線：T1 凍結數字）。
+- **為什麼這樣驗**：過濾功能正確性 + 召回品質不退步，兩者缺一都代表改動無效甚至有害。
+- **狀態**：🔲 待實作（2026-04-23 識別）
+
 ---
 
 ## 八、Code Review 發現的問題與修正計畫
@@ -337,4 +344,39 @@
 - **狀態**：✅ 完成（README 補充 eval vs production 差異說明，2026-04-21）
 
 ---
+
+
+
+ 2026-04-22 14:32:25.783  [owner] Andy
+    [broadcast] 如果我提供兩個機制
+    1 查詢的方式多一種 是 針對時間 時間越接近 權重越高
+    2 每個session 應該要提煉出tag 可以讓 往下或是fallback 查詢時 能查到更多東西？
+
+  2026-04-22 14:32:39.405  claude-claude-sonnet-0022486  (claude-sonnet-4-6)
+    兩個機制都實用，但我對它們的優先級判斷和 Opus 可能不同：
+
+    機制2（Session Tag）價值更高，因為它解決的是 vocabulary mismatch 的根本問題——tag
+是橋接「意圖描述詞」和「技術術語」的索引層，一次建好終身受益，不依賴查詢者事後猜詞。
+
+    機制1（時間權重）是輔助，對「最近在做什麼」這類問題確實有效，但有盲區：如果某個關鍵技術決策是三個月前定的，時間權重反而會壓低它，造成重要舊記憶被忽略。建議時間權重
+是可選 flag（`recent=true`），不是預設行為。
+
+    實作優先序建議：先上 Tag 機制，讓每 session 結束時提煉 3-5 個技術 tag 存入
+metadata；再上時間加權作為查詢參數，兩者組合才能覆蓋「最近的泛查」和「跨時間的精確召回」兩種場景。
+  (13615ms)
+
+  2026-04-22 14:32:44.611  claude-claude-opus-4-6-ae49e6c  (claude-opus-4-6)
+    ## 對這兩個機制的評價
+
+    兩個都該做，但優先順序和效果不同。
+
+    機制 1（時間衰減加權）：立即有效，優先做。 這直接解決了我們第一輪查詢失敗的核心場景——用戶問「最近在做什麼」，這本質上就是個時間查詢，不是語義查詢。目前純靠 cosine
+similarity 排序，一個三個月前用詞完全匹配的記憶會排在昨天高度相關的記憶前面，這是反直覺的。時間加權讓 `memory_search` 在模糊查詢時自然偏向近期結果，符合人類回憶的
+recency bias。實現上也簡單——score = α·semantic_similarity + (1-α)·time_decay，一個參數就搞定。
+
+    機制 2（session 提煉 tag）：長期價值更大，但要設計好。 Tag 等於建了一個倒排索引層，讓查詢可以先 filter 再
+rank，這是正確方向。但關鍵問題是：誰負責提煉、什麼時候提煉、tag 的詞彙表怎麼控制？ 如果靠 agent 在 session 結束時自動摘要打 tag，tag
+品質會參差不齊；如果用固定分類體系（project name + phase + tech stack），則更穩定但需要前期規劃。建議用半結構化方式——強制填 project name，其餘 tag 自由生成。
+
+    兩者搭配的查詢流程： 先用 tag 過濾（project=cartograph），再用時間加權語義排序，這樣即使查詢詞模糊，也能精準命中。
 

@@ -101,6 +101,8 @@ async def memory_search(
     query: str,
     top_k: int = TOP_K_CHUNKS,
     mode: str = "vector",
+    use_recency: bool = False,
+    hook_type: str | list[str] | None = None,
 ) -> list[dict] | dict:
     """Fast semantic search — directly searches all turn chunks.
 
@@ -110,11 +112,35 @@ async def memory_search(
     mode="vector" (default): pure embedding cosine search (fast, Phase 1 behaviour)
     mode="hybrid": BM25 + vector RRF fusion with optional cross-encoder rerank
                    Returns {results, latency_ms, mode} instead of plain list.
+    use_recency=True: apply time-decay weighting (newer memories rank higher).
+                      Uses hybrid search internally; halflife controlled by
+                      TIME_DECAY_HALFLIFE_DAYS in config.py (default: 30 days).
+    hook_type: filter results to a specific source type. Common values:
+        "assistant_text" — only assistant responses (highest semantic quality)
+        "user_prompt"    — only user inputs
+        "tool_use"       — only tool call records
+        ["assistant_text", "user_prompt"] — pass a list to match multiple types
+        None (default)   — no filter, search all chunks
     """
     t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
 
-    if mode == "hybrid":
+    if use_recency:
+        # Time-decay path: hybrid search re-ranked by recency
+        candidates = storage.search_chunks_with_recency(
+            query_vector=vectors[0],
+            query_text=query,
+            top_k=top_k,
+            hook_type=hook_type,
+        )
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "results": _format_chunks(candidates),
+            "mode": "recency",
+            "rerank_applied": False,
+            "latency_ms": latency_ms,
+        }
+    elif mode == "hybrid":
         # Hybrid: vector + BM25 fusion, then optional cross-encoder rerank
         recall_n = max(top_k, HYBRID_RECALL_N)
         candidates = storage.search_chunks_hybrid(
@@ -122,6 +148,7 @@ async def memory_search(
             query_text=query,
             top_k=recall_n,  # retrieve more for reranker
             recall_n=recall_n,
+            hook_type=hook_type,
         )
         if RERANK_ENABLED and candidates:
             reranked = await provider.rerank_async(
@@ -142,7 +169,7 @@ async def memory_search(
         }
     else:
         # Vector-only (original behaviour)
-        results = storage.search_chunks(query_vector=vectors[0], top_k=top_k)
+        results = storage.search_chunks(query_vector=vectors[0], top_k=top_k, hook_type=hook_type)
         return _format_chunks(results)
 
 
@@ -150,6 +177,8 @@ async def memory_deep_search(
     query: str,
     top_k: int = TOP_K_CHUNKS,
     mode: str = "vector",
+    use_recency: bool = False,
+    hook_type: str | list[str] | None = None,
 ) -> dict:
     """Deep search with session context — two-layer retrieval.
 
@@ -193,7 +222,17 @@ async def memory_deep_search(
     if not use_scoped:
         logger.debug("Layer 1 insufficient (%d sessions), falling back to global", len(good_sessions))
 
-    if mode == "hybrid":
+    if use_recency:
+        # Phase 3: time-decay path — hybrid re-ranked by recency
+        recall_n = max(top_k, HYBRID_RECALL_N)
+        chunks = storage.search_chunks_with_recency(
+            query_vector=q_vec,
+            query_text=query,
+            top_k=recall_n,
+            session_ids=good_sessions if use_scoped else None,
+            hook_type=hook_type,
+        )
+    elif mode == "hybrid":
         # Hybrid path: BM25 + vector fusion within the scoped session set
         recall_n = max(top_k, HYBRID_RECALL_N)
         chunks = storage.search_chunks_hybrid(
@@ -202,20 +241,22 @@ async def memory_deep_search(
             top_k=recall_n,
             recall_n=recall_n,
             session_ids=good_sessions if use_scoped else None,
+            hook_type=hook_type,
         )
     else:
         # Vector-only path (original Phase 1 behaviour)
         chunks = (
-            storage.search_chunks(q_vec, top_k=top_k, session_ids=good_sessions)
+            storage.search_chunks(q_vec, top_k=top_k, session_ids=good_sessions, hook_type=hook_type)
             if use_scoped
-            else storage.search_chunks(q_vec, top_k=top_k)
+            else storage.search_chunks(q_vec, top_k=top_k, hook_type=hook_type)
         )
 
-    # Optional cross-encoder rerank (hybrid mode only).
+    # Optional cross-encoder rerank (hybrid mode only, skipped when use_recency=True
+    # because recency scoring already produced the final ranking).
     # C5: rerank on the compact recall set (top-RECALL_N) BEFORE context expansion,
     # so the cross-encoder sees 50 candidates instead of 50×5=250.
     rerank_applied = False
-    if mode == "hybrid" and RERANK_ENABLED and chunks:
+    if not use_recency and mode == "hybrid" and RERANK_ENABLED and chunks:
         pre_rerank = _format_chunks(chunks)
         reranked = await provider.rerank_async(
             query=query,

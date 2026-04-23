@@ -57,8 +57,11 @@ from .config import (
     BM25_WEIGHT,
     COSINE_DEDUP_THRESHOLD,
     DATA_DIR,
+    HYBRID_RECALL_N,
     MIN_SESSION_SCORE,
+    RECENCY_BLEND,
     RRF_K,
+    TIME_DECAY_HALFLIFE_DAYS,
     TOP_K_CHUNKS,
     TOP_K_SESSIONS,
     VECTOR_WEIGHT,
@@ -101,6 +104,7 @@ _CHUNK_SCHEMA = pa.schema([
     pa.field("text", pa.string()),
     pa.field("vector", pa.list_(pa.float32(), 384)),
     pa.field("source", pa.string()),
+    pa.field("hook_type", pa.string()),  # e.g. "user_prompt","tool_use","assistant_text","reindex","manual"
     pa.field("text_hash", pa.string()),
     pa.field("source_file", pa.string()),  # nullable
     pa.field("created_at", pa.string()),
@@ -165,8 +169,45 @@ class Storage:
             )
         else:
             self._chunks = self._db.open_table("turn_chunks")
+            # Migration: add hook_type column if missing (older DBs won't have it)
+            try:
+                col_names = self._chunks.schema.names
+                if "hook_type" not in col_names:
+                    for expr in ("CAST(NULL AS VARCHAR)", "CAST(NULL AS TEXT)", "NULL"):
+                        try:
+                            self._chunks.add_columns({"hook_type": expr})
+                            logger.info("Migrated turn_chunks: added hook_type column (expr=%s)", expr)
+                            break
+                        except Exception as e:
+                            logger.warning("add_columns hook_type with expr=%s failed: %s", expr, e)
+            except Exception as e:
+                logger.error("turn_chunks migration failed: %s", e)
 
         self._initialized = True
+
+    def reset_database(self) -> None:
+        """Drop all tables and delete all stored memories (irreversible).
+
+        Uses full directory removal (same as reindex --wipe) to avoid
+        LanceDB stale fragment issues after a crash. Recreates empty
+        tables so the server can resume without restart.
+        """
+        import shutil
+        import lancedb as _lancedb
+
+        if DATA_DIR.exists():
+            shutil.rmtree(DATA_DIR)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        db = _lancedb.connect(str(DATA_DIR))
+        db.create_table("session_summaries", schema=_SESSION_SCHEMA)
+        db.create_table("turn_chunks", schema=_CHUNK_SCHEMA)
+        # Re-open fresh table handles on the singleton
+        self._sessions = db.open_table("session_summaries")
+        self._chunks = db.open_table("turn_chunks")
+        self._db = db
+        self._bm25_cache.clear()
+        self._initialized = True  # tables exist and are ready
+        logger.info("Database reset: all memories deleted")
 
     # ── Session summaries ─────────────────────────────────────────────────────
 
@@ -356,6 +397,7 @@ class Storage:
             "text": [c["text"] for c in chunks],
             "vector": pa.array([c["vector"] for c in chunks], type=pa.list_(pa.float32(), 384)),
             "source": [c["source"] for c in chunks],
+            "hook_type": [c.get("hook_type") or "" for c in chunks],
             "text_hash": [c["text_hash"] for c in chunks],
             "source_file": [c.get("source_file") for c in chunks],
             "created_at": [c["created_at"] for c in chunks],
@@ -366,13 +408,23 @@ class Storage:
         query_vector: list[float],
         top_k: int = TOP_K_CHUNKS,
         session_ids: list[str] | None = None,
+        hook_type: str | list[str] | None = None,
     ) -> list[dict]:
-        """Vector search over turn_chunks, optionally filtered by session_ids."""
+        """Vector search over turn_chunks, optionally filtered by session_ids / hook_type."""
         assert self._initialized
         search = self._chunks.search(query_vector).metric("cosine").limit(top_k)
+        filters: list[str] = []
         if session_ids:
             id_list = ", ".join(f"'{s}'" for s in session_ids)
-            search = search.where(f"session_id IN ({id_list})", prefilter=True)
+            filters.append(f"session_id IN ({id_list})")
+        if hook_type:
+            if isinstance(hook_type, list):
+                type_list = ", ".join(f"'{t}'" for t in hook_type)
+                filters.append(f"hook_type IN ({type_list})")
+            else:
+                filters.append(f"hook_type = '{hook_type}'")
+        if filters:
+            search = search.where(" AND ".join(filters), prefilter=True)
         df = search.to_pandas()
         return df.to_dict(orient="records")
 
@@ -434,6 +486,7 @@ class Storage:
         query: str,
         top_k: int = TOP_K_CHUNKS,
         session_ids: list[str] | None = None,
+        hook_type: str | list[str] | None = None,
     ) -> list[dict]:
         """BM25 keyword search over turn_chunks.
 
@@ -448,13 +501,22 @@ class Storage:
         query_tokens = _tokenize_for_bm25(query)
         scores = bm25.get_scores(query_tokens)
 
-        # Pair (score, chunk) and sort descending
+        # Pair (score, chunk) and sort descending; apply hook_type filter post-index
         scored = sorted(
             zip(scores, chunks), key=lambda x: x[0], reverse=True
         )
         results = []
-        for score, chunk in scored[:top_k]:
+        for score, chunk in scored:
+            if hook_type:
+                chunk_ht = chunk.get("hook_type")
+                if isinstance(hook_type, list):
+                    if chunk_ht not in hook_type:
+                        continue
+                elif chunk_ht != hook_type:
+                    continue
             results.append({**chunk, "_bm25_score": float(score)})
+            if len(results) >= top_k:
+                break
         return results
 
     def search_chunks_hybrid(
@@ -465,6 +527,7 @@ class Storage:
         recall_n: int = 50,
         session_ids: list[str] | None = None,
         rrf_k: int = RRF_K,
+        hook_type: str | list[str] | None = None,
     ) -> list[dict]:
         """Hybrid search: RRF fusion of vector + BM25 results.
 
@@ -481,12 +544,14 @@ class Storage:
             query_vector=query_vector,
             top_k=recall_n,
             session_ids=session_ids,
+            hook_type=hook_type,
         )
         # Step 2: BM25 recall
         bm25_results = self.search_chunks_bm25(
             query=query_text,
             top_k=recall_n,
             session_ids=session_ids,
+            hook_type=hook_type,
         )
 
         # Step 3: RRF fusion
@@ -529,6 +594,66 @@ class Storage:
 
         fused.sort(key=lambda x: x["_hybrid_score"], reverse=True)
         return fused[:top_k]
+
+    # ── Phase 3: Time-decay search ────────────────────────────────────────────
+
+    def search_chunks_with_recency(
+        self,
+        query_vector: list[float],
+        query_text: str,
+        top_k: int = TOP_K_CHUNKS,
+        session_ids: list[str] | None = None,
+        halflife_days: int = TIME_DECAY_HALFLIFE_DAYS,
+        hook_type: str | list[str] | None = None,
+    ) -> list[dict]:
+        """Hybrid search with exponential time-decay weighting.
+
+        Retrieves more candidates than needed, then re-ranks by:
+            final_score = hybrid_score * exp(-age_days / halflife_days)
+
+        This makes newer memories naturally rank higher while still
+        respecting semantic relevance. halflife_days controls the trade-off:
+        - smaller (e.g. 7)  → strongly prefer recent memories
+        - larger  (e.g. 90) → mild recency boost, mostly semantic
+        """
+        import math
+        from datetime import datetime, timezone
+
+        # Retrieve a larger candidate pool so recency re-ranking has room to work
+        recall_n = max(top_k * 3, HYBRID_RECALL_N)
+        results = self.search_chunks_hybrid(
+            query_vector=query_vector,
+            query_text=query_text,
+            top_k=recall_n,
+            recall_n=recall_n,
+            session_ids=session_ids,
+            hook_type=hook_type,
+        )
+
+        if not results:
+            return []
+
+        now = datetime.now(timezone.utc)
+        for chunk in results:
+            created_at = chunk.get("created_at")
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(created_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    age_days = max(0, (now - dt).days)
+                except (ValueError, TypeError):
+                    age_days = 9999
+            else:
+                age_days = 9999  # no timestamp → treat as very old
+
+            decay = math.exp(-age_days / halflife_days)
+            base_score = chunk.get("_hybrid_score", 0.0)
+            effective_decay = RECENCY_BLEND * decay + (1.0 - RECENCY_BLEND)
+            chunk["_recency_score"] = base_score * effective_decay
+
+        results.sort(key=lambda c: c.get("_recency_score", 0.0), reverse=True)
+        return results[:top_k]
 
     # ── Phase 2: Session-level cosine dedup ───────────────────────────────────
 
@@ -693,8 +818,17 @@ class Storage:
         role: str,
         source: str,
         source_file: str | None = None,
+        hook_type: str | None = None,
     ) -> list[dict]:
-        """Build chunk dicts from texts + vectors, assigning turn_id + dedup."""
+        """Build chunk dicts from texts + vectors, assigning turn_id + dedup.
+
+        hook_type: classifies the origin of this chunk, e.g.:
+            "user_prompt"    — UserPromptSubmit hook
+            "tool_use"       — PostToolUse hook
+            "assistant_text" — Stop hook (transcript assistant text)
+            "reindex"        — patrick reindex CLI command
+            "manual"         — direct memory_save call
+        """
         turn_id = str(uuid.uuid4())
         total = len(texts)
         now = _now()
@@ -713,6 +847,7 @@ class Storage:
                 "text": text,
                 "vector": vector,
                 "source": source,
+                "hook_type": hook_type or "",
                 "text_hash": text_hash,
                 "source_file": source_file,
                 "created_at": now,
