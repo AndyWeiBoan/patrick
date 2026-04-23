@@ -82,7 +82,7 @@ At the end of each session, Patrick:
 
 ### MCP Server
 - **[FastMCP](https://github.com/jlowin/fastmcp)** SSE server on `http://127.0.0.1:3141/sse`
-- Exposes 4 tools: `memory_search`, `memory_deep_search`, `memory_sessions`, `memory_save`
+- Exposes 3 tools: `memory_search`, `memory_sessions`, `memory_save` (~~`memory_deep_search`~~ temporarily disabled)
 - Custom `/observe` POST endpoint for hook ingestion
 
 ---
@@ -288,7 +288,7 @@ Nothing leaves your machine.
 | Tool | When to use |
 |---|---|
 | `memory_search` | Quick lookup of a specific fact or phrase |
-| `memory_deep_search` | Cross-session context recall (use at session start) |
+| ~~`memory_deep_search`~~ | ~~Cross-session context recall (use at session start)~~ — *temporarily disabled* |
 | `memory_sessions` | List all stored sessions with summaries |
 | `memory_save` | Explicitly save a decision or conclusion (rarely needed — hooks handle most storage) |
 

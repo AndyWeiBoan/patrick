@@ -18,7 +18,7 @@ from .embedding import provider
 from .observer import observe_handler, start_worker
 from .storage import storage
 from .tools import (
-    memory_deep_search,
+    # memory_deep_search,  # disabled — not mature yet
     memory_save,
     memory_search,
     memory_sessions,
@@ -37,20 +37,15 @@ mcp = FastMCP(
     instructions=(
         "Local memory server that stores and retrieves conversation history across sessions. "
         "PROACTIVE USAGE RULES:\n"
-        "1. At the START of any session where the user mentions past work, an ongoing project, "
-        "a previous decision, or anything that implies continuity — call memory_deep_search FIRST, "
-        "before answering. Do not rely on in-context memory alone.\n"
-        "2. Use memory_deep_search for questions needing full context or cross-session recall.\n"
-        "3. Use memory_search for quick single-fact lookups.\n"
-        "4. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries. "
-        "memory_save is ALWAYS required after memory_deep_search — see that tool's instructions."
+        "1. Use memory_search for quick single-fact lookups or semantic search across all stored memories.\n"
+        "2. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries."
     ),
 )
 
 # Register tools
 mcp.tool()(memory_save)
 mcp.tool()(memory_search)
-mcp.tool()(memory_deep_search)
+# mcp.tool()(memory_deep_search)   # disabled — not mature yet
 mcp.tool()(memory_sessions)
 
 # Register /observe custom route
