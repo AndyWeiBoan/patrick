@@ -322,14 +322,43 @@ async def memory_deep_search(
     }
 
 
-async def memory_sessions() -> list[dict]:
-    """List all sessions with metadata.
+async def memory_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    include_body: bool = False,
+    session_type: str | None = None,
+    after: str | None = None,
+) -> dict:
+    """Browse conversation history. Start here for 'what did we work on?' or 'which session covered X?'.
 
-    Returns: [{session_id, created_at, summary_text, hint}]
-    summary_text: centroid auto-summary, always present once any chunk exists.
-    hint: agent LLM synthesis, null if not yet provided for that session.
+    Default call returns the 50 most recent sessions with opening only (compact).
+    Use filters to narrow down, include_body=True for full detail.
+
+    Args:
+        limit: max sessions to return (default 50, 0 = all). Use 10-20 for quick scan.
+        offset: skip first N sessions (for pagination). E.g. offset=50 for page 2.
+        include_body: False (default) = only opening (≤200 chars per session, compact list).
+                      True = include full body, summary_text, hint (for drill-down).
+        session_type: "regular" (1-on-1 Claude session) or "multi_agent" (discussion room).
+                      None (default) = all types.
+        after: ISO date string, e.g. "2026-04-20". Only sessions created on/after this date.
+
+    Returns: {sessions: [{session_id, created_at, opening, session_type, summary_status, ...}],
+              total: int, limit: int, offset: int}
+
+    Typical usage:
+        memory_sessions()                                        → latest 50, opening only
+        memory_sessions(limit=10, session_type="regular")        → recent regular sessions
+        memory_sessions(after="2026-04-24", include_body=True)   → recent sessions with full detail
+        memory_sessions(limit=0)                                 → all sessions (opening only)
     """
-    return storage.list_sessions()
+    return storage.list_sessions(
+        limit=limit,
+        offset=offset,
+        include_body=include_body,
+        session_type=session_type,
+        after=after,
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -14,10 +14,18 @@ import sys
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 
-from .config import COMPACT_CHECK_INTERVAL, COMPACT_FRAGMENT_THRESHOLD, HOST, PORT
+from .config import (
+    COMPACT_CHECK_INTERVAL,
+    COMPACT_FRAGMENT_THRESHOLD,
+    HOST,
+    PORT,
+    SUMMARY_COOLDOWN,
+    SUMMARY_SCAN_INTERVAL,
+)
 from .embedding import provider
 from .observer import observe_handler, start_worker
 from .storage import storage
+from .summary import generate_summary
 from .tools import (
     # memory_deep_search,  # disabled — not mature yet
     memory_save,
@@ -36,22 +44,25 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     name="patrick-memory",
     instructions=(
-        "Local memory server that stores and retrieves conversation history across sessions. "
-        "PROACTIVE USAGE RULES:\n"
-        "1. Use memory_search for quick single-fact lookups or semantic search across all stored memories.\n"
-        "2. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries.\n"
-        "SEARCH STRATEGY:\n"
-        "- First search with include_tool_calls=False (default) for clean semantic results.\n"
-        "- If results are insufficient or you need to debug tool usage details, "
-        "search again with include_tool_calls=True to include tool call records."
+        "Local memory server that stores and retrieves conversation history across sessions.\n\n"
+        "TOOL SELECTION — pick by question type:\n"
+        "- Browse/timeline questions ('what did we work on recently?', 'which session discussed X?')\n"
+        "  → memory_sessions first. Scan the opening list, then drill down with include_body=True.\n"
+        "- Precise fact lookup ('how was X implemented?', 'what was the decision on Y?')\n"
+        "  → memory_search. Searches all chunk content semantically.\n"
+        "- memory_save: use sparingly — only for explicit user requests or major decisions.\n\n"
+        "SEARCH TIPS:\n"
+        "- Default memory_search uses hook_type=None (all chunks). Add hook_type='assistant_text'\n"
+        "  for higher-quality semantic results, or hook_type='user_prompt' for user questions.\n"
+        "- If results are insufficient, try mode='hybrid' for BM25+vector fusion."
     ),
 )
 
-# Register tools
-mcp.tool()(memory_save)
-mcp.tool()(memory_search)
-# mcp.tool()(memory_deep_search)   # disabled — not mature yet
+# Register tools — order matters: memory_sessions first (browse entry point)
 mcp.tool()(memory_sessions)
+mcp.tool()(memory_search)
+mcp.tool()(memory_save)
+# mcp.tool()(memory_deep_search)   # disabled — not mature yet
 
 # Register /observe custom route
 mcp.custom_route("/observe", methods=["POST"])(observe_handler)
@@ -92,6 +103,70 @@ def start_compact_scheduler() -> None:
     logger.info(
         "Compaction scheduler started (interval=%ds, threshold=%d fragments)",
         COMPACT_CHECK_INTERVAL, COMPACT_FRAGMENT_THRESHOLD,
+    )
+
+
+# ── Phase 4: Summary backfill ───────────────────────────────────────────────
+
+_summary_task: asyncio.Task | None = None
+
+
+async def _summary_backfill() -> None:
+    """Periodically scan for sessions needing Phase 4 summary and generate them.
+
+    Discovery paths:
+    1. summary_status = 'pending' — regular sessions, stop hook fired
+    2. Stale sessions (last chunk > SUMMARY_COOLDOWN ago) not yet 'done' —
+       multi-agent sessions or any missed session
+    """
+    await asyncio.sleep(10)  # let server settle on startup
+    while True:
+        try:
+            loop = asyncio.get_running_loop()
+            sessions = await loop.run_in_executor(
+                None, storage.get_sessions_needing_summary, SUMMARY_COOLDOWN
+            )
+            if sessions:
+                logger.info("Summary backfill: %d sessions to process", len(sessions))
+                for sid in sessions:
+                    try:
+                        result = await generate_summary(sid)
+                        if result:
+                            storage.upsert_session_summary(
+                                session_id=sid,
+                                summary_text=result["summary_text"],
+                                vector=result["vector"],
+                                opening=result["opening"],
+                                body=result["body"],
+                                session_type=result["session_type"],
+                                summary_status="done",
+                            )
+                            logger.info(
+                                "Summary generated for session %s (%s)",
+                                sid[:8], result["session_type"],
+                            )
+                        else:
+                            # No usable data — mark skipped to avoid re-scanning
+                            storage.update_session_status(sid, "skipped")
+                            logger.info("Summary skipped for session %s (no data)", sid[:8])
+                    except Exception as exc:
+                        logger.warning(
+                            "Summary generation failed for %s: %s", sid[:8], exc
+                        )
+        except Exception as exc:
+            logger.warning("Summary backfill scan error: %s", exc)
+
+        await asyncio.sleep(SUMMARY_SCAN_INTERVAL)
+
+
+def start_summary_scheduler() -> None:
+    """Kick off the summary backfill task (must be called from a running event loop)."""
+    global _summary_task
+    loop = asyncio.get_running_loop()
+    _summary_task = loop.create_task(_summary_backfill())
+    logger.info(
+        "Summary backfill scheduler started (interval=%ds, cooldown=%ds)",
+        SUMMARY_SCAN_INTERVAL, SUMMARY_COOLDOWN,
     )
 
 
@@ -143,6 +218,7 @@ def main() -> None:
     async def _patched_startup(sockets=None):
         start_worker()              # observer batch worker
         start_compact_scheduler()   # periodic LanceDB compaction
+        start_summary_scheduler()   # Phase 4 summary backfill
         await _orig_startup(sockets)
 
     server.startup = _patched_startup

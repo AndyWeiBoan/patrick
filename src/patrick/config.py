@@ -70,3 +70,7 @@ COSINE_DEDUP_THRESHOLD: float = 0.95  # session-level semantic dedup threshold
 # At halflife_days age → score halved; at 2× halflife → quartered.
 TIME_DECAY_HALFLIFE_DAYS: int = 30   # half-life in days; smaller = prefer newer memories more
 RECENCY_BLEND: float = 1.0           # recency influence (0=ignore time, 1=full decay applied)
+
+# ── Phase 4: Session Summary ─────────────────────────────────────────────────
+SUMMARY_SCAN_INTERVAL: int = 120   # seconds between summary backfill scans (2 min)
+SUMMARY_COOLDOWN: int = 300        # seconds since last chunk before treating session as complete (5 min)

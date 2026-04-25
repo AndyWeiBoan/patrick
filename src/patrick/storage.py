@@ -88,8 +88,12 @@ def _is_null(val: Any) -> bool:
 
 _SESSION_SCHEMA = pa.schema([
     pa.field("session_id", pa.string()),
-    pa.field("summary_text", pa.string()),   # centroid auto-summary, always present
+    pa.field("summary_text", pa.string()),   # Phase 4: opening + "\n" + body (display)
     pa.field("hint", pa.string()),           # agent LLM synthesis, optional upgrade
+    pa.field("opening", pa.string()),        # Phase 4: first user_prompt or Discussion topic (≤200 chars)
+    pa.field("body", pa.string()),           # Phase 4: assistant_text excerpts or broadcast messages
+    pa.field("session_type", pa.string()),   # Phase 4: "regular" | "multi_agent"
+    pa.field("summary_status", pa.string()), # Phase 4: "pending" | "done" | "skipped"
     pa.field("vector", pa.list_(pa.float32(), 384)),
     pa.field("created_at", pa.string()),
     pa.field("updated_at", pa.string()),
@@ -164,6 +168,22 @@ class Storage:
             except Exception as e:
                 logger.error("session_summaries migration failed: %s", e)
 
+            # Phase 4 migration: add opening, body, session_type, summary_status
+            try:
+                col_names = self._sessions.schema.names  # refresh after hint migration
+                for col_name in ("opening", "body", "session_type", "summary_status"):
+                    if col_name not in col_names:
+                        # '' works on current LanceDB; CAST variants are fallbacks
+                        for expr in ("''", "CAST('' AS VARCHAR)", "CAST('' AS TEXT)"):
+                            try:
+                                self._sessions.add_columns({col_name: expr})
+                                logger.info("Migrated session_summaries: added %s column", col_name)
+                                break
+                            except Exception as e:
+                                logger.warning("add_columns %s with expr=%s failed: %s", col_name, expr, e)
+            except Exception as e:
+                logger.error("Phase 4 session_summaries migration failed: %s", e)
+
         if "turn_chunks" not in existing:
             self._chunks = self._db.create_table(
                 "turn_chunks", schema=_CHUNK_SCHEMA
@@ -218,19 +238,26 @@ class Storage:
         summary_text: str,
         vector: list[float],
         hint: str | None = None,
+        opening: str | None = None,
+        body: str | None = None,
+        session_type: str | None = None,
+        summary_status: str | None = None,
     ) -> None:
         """Insert or update a session summary.
 
-        summary_text: centroid-derived auto-summary (always provided).
-        vector: embedding to use for Layer 1 search — pass embed(hint) when hint
-                is provided so hint-equipped sessions rank higher on topic match.
-        hint: optional agent LLM synthesis; stored separately, survives centroid
-              recalculation because it is only written here when explicitly given.
+        summary_text: centroid-derived auto-summary or Phase 4 opening+body.
+        vector: embedding to use for Layer 1 search.
+        hint: optional agent LLM synthesis; stored separately.
+        opening/body/session_type/summary_status: Phase 4 fields; None = preserve existing.
         """
         assert self._initialized
         now = _now()
-        # Check if exists to preserve created_at and existing hint
+        # Check if exists to preserve created_at, hint, and Phase 4 fields
         existing_hint = hint  # caller-supplied wins
+        existing_opening = opening
+        existing_body = body
+        existing_session_type = session_type
+        existing_summary_status = summary_status
         created_at = now
         try:
             existing = (
@@ -244,11 +271,23 @@ class Storage:
                 if existing_hint is None:
                     raw = existing.iloc[0].get("hint")
                     existing_hint = None if _is_null(raw) else str(raw)
+                # Phase 4: preserve existing fields when not explicitly provided
+                if existing_opening is None:
+                    raw = existing.iloc[0].get("opening")
+                    existing_opening = None if _is_null(raw) else str(raw)
+                if existing_body is None:
+                    raw = existing.iloc[0].get("body")
+                    existing_body = None if _is_null(raw) else str(raw)
+                if existing_session_type is None:
+                    raw = existing.iloc[0].get("session_type")
+                    existing_session_type = None if _is_null(raw) else str(raw)
+                if existing_summary_status is None:
+                    raw = existing.iloc[0].get("summary_status")
+                    existing_summary_status = None if _is_null(raw) else str(raw)
         except Exception:
             pass
 
-        # Build write payload — include 'hint' only if the column exists in table
-        # (older DBs may not have it if migration failed; guard prevents schema error).
+        # Build write payload — guard each column against missing schema
         table_col_names = self._sessions.schema.names
         row: dict = {
             "session_id": [session_id],
@@ -259,6 +298,14 @@ class Storage:
         }
         if "hint" in table_col_names:
             row["hint"] = [existing_hint]
+        if "opening" in table_col_names:
+            row["opening"] = [existing_opening or ""]
+        if "body" in table_col_names:
+            row["body"] = [existing_body or ""]
+        if "session_type" in table_col_names:
+            row["session_type"] = [existing_session_type or ""]
+        if "summary_status" in table_col_names:
+            row["summary_status"] = [existing_summary_status or ""]
 
         new_data = pa.table(row)
         (
@@ -281,13 +328,19 @@ class Storage:
             if len(df) == 0:
                 return None
             row = df.iloc[0]
-            return {
+            result = {
                 "session_id": row["session_id"],
                 "summary_text": None if _is_null(row.get("summary_text")) else row["summary_text"],
                 "hint": None if _is_null(row.get("hint")) else row["hint"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
+            # Phase 4 fields (may not exist in older schemas)
+            for field in ("opening", "body", "session_type", "summary_status"):
+                if field in row.index:
+                    val = row.get(field)
+                    result[field] = None if _is_null(val) else str(val)
+            return result
         except Exception:
             return None
 
@@ -335,6 +388,103 @@ class Storage:
         except Exception:
             pass  # Non-fatal; centroid is best-effort
 
+    # ── Phase 4: Summary lifecycle ──────────────────────────────────────────
+
+    def mark_session_pending(self, session_id: str) -> None:
+        """Mark a session as needing Phase 4 summary generation."""
+        assert self._initialized
+        col_names = self._sessions.schema.names
+        if "summary_status" not in col_names:
+            return  # Phase 4 columns not migrated yet
+        now = _now()
+        try:
+            self._sessions.update(
+                where=f"session_id = '{session_id}'",
+                values={"summary_status": "pending", "updated_at": now},
+            )
+            logger.debug("Marked session %s as pending summary", session_id)
+        except Exception as e:
+            logger.warning("mark_session_pending failed for %s: %s", session_id, e)
+
+    def update_session_status(self, session_id: str, status: str) -> None:
+        """Update summary_status for a session; creates placeholder if no record exists."""
+        assert self._initialized
+        col_names = self._sessions.schema.names
+        if "summary_status" not in col_names:
+            return
+        now = _now()
+        existing = self.get_session(session_id)
+        if existing:
+            try:
+                self._sessions.update(
+                    where=f"session_id = '{session_id}'",
+                    values={"summary_status": status, "updated_at": now},
+                )
+            except Exception as e:
+                logger.warning("update_session_status failed for %s: %s", session_id, e)
+        else:
+            # Create placeholder so backfill won't re-scan this session
+            self.upsert_session_summary(
+                session_id=session_id,
+                summary_text="",
+                vector=[0.0] * 384,
+                summary_status=status,
+            )
+
+    def get_sessions_needing_summary(self, cooldown_seconds: int = 300) -> list[str]:
+        """Find sessions needing Phase 4 summary generation.
+
+        Two discovery paths:
+        1. summary_status = 'pending' (regular sessions marked by stop hook)
+        2. summary_status != 'done' AND last chunk older than cooldown
+           (multi-agent sessions where stop hook never fires, or any missed session)
+        """
+        assert self._initialized
+        col_names = self._sessions.schema.names
+        if "summary_status" not in col_names:
+            return []
+
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)).isoformat()
+
+        try:
+            session_df = self._sessions.to_pandas()
+        except Exception:
+            session_df = pd.DataFrame()
+
+        result: set[str] = set()
+
+        # Path 1: explicitly pending
+        if not session_df.empty and "summary_status" in session_df.columns:
+            mask = session_df["summary_status"] == "pending"
+            result.update(session_df[mask]["session_id"].tolist())
+
+        # Path 2: stale sessions not yet "done"
+        try:
+            chunk_df = self._chunks.to_pandas()
+            if not chunk_df.empty:
+                session_last_chunk = chunk_df.groupby("session_id")["created_at"].max()
+                stale_sessions = session_last_chunk[session_last_chunk < cutoff].index.tolist()
+
+                done_sessions: set[str] = set()
+                skipped_sessions: set[str] = set()
+                if not session_df.empty and "summary_status" in session_df.columns:
+                    done_sessions = set(
+                        session_df[session_df["summary_status"] == "done"]["session_id"].tolist()
+                    )
+                    skipped_sessions = set(
+                        session_df[session_df["summary_status"] == "skipped"]["session_id"].tolist()
+                    )
+
+                for sid in stale_sessions:
+                    if sid not in done_sessions and sid not in skipped_sessions:
+                        result.add(sid)
+        except Exception as e:
+            logger.warning("Session discovery chunk scan failed: %s", e)
+
+        return list(result)
+
     def search_sessions(
         self, query_vector: list[float], top_k: int = TOP_K_SESSIONS
     ) -> list[dict]:
@@ -348,22 +498,72 @@ class Storage:
         )
         return results.to_dict(orient="records")
 
-    def list_sessions(self) -> list[dict]:
-        """Return all sessions with metadata."""
+    def list_sessions(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        include_body: bool = False,
+        session_type: str | None = None,
+        after: str | None = None,
+    ) -> dict:
+        """Return sessions with metadata, paginated.
+
+        Args:
+            limit: max sessions to return (default 50, 0 = all).
+            offset: skip first N sessions (for pagination).
+            include_body: if True, include full body text; otherwise only opening.
+            session_type: filter by "regular" or "multi_agent".
+            after: ISO date string (e.g. "2026-04-20"), only sessions created on/after.
+
+        Returns:
+            {"sessions": [...], "total": int, "limit": int, "offset": int}
+        """
         assert self._initialized
         try:
             df = self._sessions.to_pandas()
+
+            # ── Filtering ────────────────────────────────────────────
+            if session_type and "session_type" in df.columns:
+                df = df[df["session_type"] == session_type]
+
+            if after:
+                df = df[df["created_at"] >= after]
+
+            # Sort newest first
+            df = df.sort_values("created_at", ascending=False).reset_index(drop=True)
+
+            total = len(df)
+
+            # ── Pagination ───────────────────────────────────────────
+            if limit > 0:
+                df = df.iloc[offset : offset + limit]
+            elif offset > 0:
+                df = df.iloc[offset:]
+
             out = []
             for _, row in df.iterrows():
-                out.append({
+                entry = {
                     "session_id": row["session_id"],
                     "created_at": row["created_at"],
-                    "summary_text": None if _is_null(row.get("summary_text")) else row["summary_text"],
-                    "hint": None if _is_null(row.get("hint")) else row["hint"],
-                })
-            return out
+                    "opening": None,
+                    "session_type": None,
+                    "summary_status": None,
+                }
+                # Phase 4 fields
+                for field in ("opening", "session_type", "summary_status"):
+                    if field in row.index:
+                        val = row.get(field)
+                        entry[field] = None if _is_null(val) else str(val)
+
+                if include_body:
+                    entry["body"] = None if _is_null(row.get("body")) else row.get("body")
+                    entry["summary_text"] = None if _is_null(row.get("summary_text")) else row["summary_text"]
+                    entry["hint"] = None if _is_null(row.get("hint")) else row["hint"]
+
+                out.append(entry)
+            return {"sessions": out, "total": total, "limit": limit, "offset": offset}
         except Exception:
-            return []
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
 
     # ── Turn chunks ───────────────────────────────────────────────────────────
 

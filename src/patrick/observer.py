@@ -79,6 +79,8 @@ async def _process_item(item: dict) -> None:
                 await loop.run_in_executor(None, storage.compute_and_upsert_centroid, session_id)
         except Exception as exc:
             logger.warning("Cosine dedup failed for session %s: %s", session_id, exc)
+        # Phase 4: mark session as needing summary generation
+        storage.mark_session_pending(session_id)
         return
 
     if not text or not session_id:
