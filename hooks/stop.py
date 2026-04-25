@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Hook: Stop — capture all assistant text from transcript, then signal session end."""
+"""Hook: Stop — capture all assistant text from transcript, then signal session end.
+
+Fallback logic for multi-agent sessions where Claude Code may send
+an empty payload (no session_id, no transcript_path):
+  1. session_id: fall back to PATRICK_SESSION_ID env var (set by SessionStart hook)
+  2. transcript_path: glob search ~/.claude/projects/*/{session_id}.jsonl
+"""
+import glob
 import json
+import os
 import sys
 import urllib.request
+from pathlib import Path
 
 SERVER_URL = "http://127.0.0.1:3141/observe"
 TIMEOUT = 3
@@ -76,12 +85,23 @@ def main() -> None:
     except Exception:
         data = {}
 
-    session_id = data.get("session_id") or data.get("sessionId", "")
+    session_id = (
+        data.get("session_id")
+        or data.get("sessionId", "")
+        or os.environ.get("PATRICK_SESSION_ID", "")
+    )
     if not session_id:
         return
 
     # 1. Extract and store ALL assistant text responses from transcript
     transcript_path = data.get("transcript_path", "")
+    if not transcript_path:
+        # Fallback: search for transcript file by session_id
+        matches = glob.glob(
+            str(Path.home() / ".claude" / "projects" / "*" / f"{session_id}.jsonl")
+        )
+        if matches:
+            transcript_path = matches[0]
     if transcript_path:
         for text in extract_all_assistant_texts(transcript_path):
             post({

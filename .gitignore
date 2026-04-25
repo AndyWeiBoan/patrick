@@ -27,6 +27,7 @@ Thumbs.db
 
 # Patrick runtime data
 ~/.patrick/
+data/
 
 # Test artifacts
 .pytest_cache/

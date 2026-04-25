@@ -6,6 +6,7 @@ All hook events and memory operations share one embedding model + LanceDB instan
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 import sys
@@ -13,7 +14,7 @@ import sys
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 
-from .config import HOST, PORT
+from .config import COMPACT_CHECK_INTERVAL, COMPACT_FRAGMENT_THRESHOLD, HOST, PORT
 from .embedding import provider
 from .observer import observe_handler, start_worker
 from .storage import storage
@@ -38,7 +39,11 @@ mcp = FastMCP(
         "Local memory server that stores and retrieves conversation history across sessions. "
         "PROACTIVE USAGE RULES:\n"
         "1. Use memory_search for quick single-fact lookups or semantic search across all stored memories.\n"
-        "2. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries."
+        "2. Use memory_save sparingly: only for explicit user requests, major decisions, or session end summaries.\n"
+        "SEARCH STRATEGY:\n"
+        "- First search with include_tool_calls=False (default) for clean semantic results.\n"
+        "- If results are insufficient or you need to debug tool usage details, "
+        "search again with include_tool_calls=True to include tool call records."
     ),
 )
 
@@ -50,6 +55,44 @@ mcp.tool()(memory_sessions)
 
 # Register /observe custom route
 mcp.custom_route("/observe", methods=["POST"])(observe_handler)
+
+
+# ── Scheduled compaction ──────────────────────────────────────────────────────
+
+_compact_task: asyncio.Task | None = None
+
+
+async def _scheduled_compact() -> None:
+    """Periodically check LanceDB fragment count and compact if above threshold."""
+    while True:
+        await asyncio.sleep(COMPACT_CHECK_INTERVAL)
+        try:
+            loop = asyncio.get_running_loop()
+            counts = await loop.run_in_executor(None, storage.fragment_count)
+            max_frags = max(counts.values()) if counts else 0
+            if max_frags >= COMPACT_FRAGMENT_THRESHOLD:
+                logger.info(
+                    "Fragment count exceeds threshold (%d >= %d): %s — starting compaction",
+                    max_frags, COMPACT_FRAGMENT_THRESHOLD, counts,
+                )
+                await loop.run_in_executor(None, storage.compact)
+                counts_after = await loop.run_in_executor(None, storage.fragment_count)
+                logger.info("Scheduled compaction done: %s → %s", counts, counts_after)
+            else:
+                logger.debug("Fragment check OK (%s), below threshold %d", counts, COMPACT_FRAGMENT_THRESHOLD)
+        except Exception as exc:
+            logger.warning("Scheduled compaction error: %s", exc)
+
+
+def start_compact_scheduler() -> None:
+    """Kick off the scheduled compaction task (must be called from a running event loop)."""
+    global _compact_task
+    loop = asyncio.get_running_loop()
+    _compact_task = loop.create_task(_scheduled_compact())
+    logger.info(
+        "Compaction scheduler started (interval=%ds, threshold=%d fragments)",
+        COMPACT_CHECK_INTERVAL, COMPACT_FRAGMENT_THRESHOLD,
+    )
 
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
@@ -79,6 +122,8 @@ def main() -> None:
     logger.info("Embedding model loaded")
     storage.initialize()
     logger.info("LanceDB initialized")
+    storage.compact()
+    logger.info("LanceDB compaction done")
 
     app = mcp.sse_app()
 
@@ -96,7 +141,8 @@ def main() -> None:
     _orig_startup = server.startup
 
     async def _patched_startup(sockets=None):
-        start_worker()   # task lives in uvicorn's loop — correct
+        start_worker()              # observer batch worker
+        start_compact_scheduler()   # periodic LanceDB compaction
         await _orig_startup(sockets)
 
     server.startup = _patched_startup

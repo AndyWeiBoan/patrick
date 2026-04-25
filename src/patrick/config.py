@@ -51,6 +51,16 @@ RERANK_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 RERANK_TOP_N: int = 50         # candidates to rerank (from hybrid recall)
 RERANK_ENABLED: bool = True    # global switch; set False to skip rerank & measure latency delta
 
+# ── Scheduled Compaction ──────────────────────────────────────────────────────
+COMPACT_CHECK_INTERVAL: int = 300       # seconds between fragment-count checks (5 min)
+COMPACT_FRAGMENT_THRESHOLD: int = 100   # compact when any table exceeds this many .lance files
+
+# ── Role-based scoring boost ──────────────────────────────────────────────────
+# In hybrid search, assistant responses typically have higher information density
+# than user prompts (which may contain framework-injected context, raw logs, etc.).
+# This multiplier boosts assistant_text chunks in RRF fusion scoring.
+ASSISTANT_TEXT_BOOST: float = 1.5  # 1.0 = no boost; 1.5 = 50% score increase
+
 # ── Phase 2: Deduplication ────────────────────────────────────────────────────
 COSINE_DEDUP_THRESHOLD: float = 0.95  # session-level semantic dedup threshold
 

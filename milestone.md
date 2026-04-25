@@ -87,3 +87,37 @@
 - 零 LLM token 消耗於記憶管理
 - 無 Docker、無外部 API、無 API key
 - `pip install fastembed lancedb tokenizers aiohttp`（或同等輕量依賴）即可啟動
+
+---
+
+## 已知問題 / Pending Issues
+
+### Issue #1 — Multi-agent (OpenParty) 的 assistant_text 無法被自動存入
+
+**狀態：** 待解決
+
+**問題描述：**
+在 OpenParty 多 agent 對話場景下，`assistant_text` chunks 從未被存入 patrick DB（`user_prompt` 和 `tool_use` chunks 正常存入）。
+
+**根本原因：**
+OpenParty bridge.py 使用 `claude_agent_sdk.query()` 以 subprocess 模式逐 turn 呼叫 Claude。在此模式下，Claude Code 的 `Stop` hook **完全不會觸發**（已實測確認：`/tmp/patrick_stop_debug.log` 不存在）。`Stop` hook 是現有設計中負責存入 assistant 回應的唯一入口。
+
+**調查過程：**
+- `UserPromptSubmit` hook：✅ 有 fire（`user_prompt` chunks 存在為證）
+- `PreToolUse / PostToolUse` hook：✅ 有 fire（`tool_use` chunks 存在為證）
+- `Stop` hook：❌ 不 fire（subprocess 模式下 Claude process 直接退出，無「等待下一輸入」狀態）
+- `ClaudeSDKClient` programmatic hooks：底層仍是同一 subprocess 機制，效果存疑
+- Stop hook payload 中的 `last_assistant_message` 欄位：理論上存在，但 Stop hook 不 fire 故無法利用
+
+**可行解法（按優先順序）：**
+
+1. **方案 A — bridge.py 直接 POST（主要，確定有效）**
+   在 `_call_claude()` 的 `elif isinstance(message, ResultMessage):` 區塊內，直接 POST `result_text` 給 patrick `/observe`。bridge.py 已有完整的 `result_text`（由 SDK 組好）和 `self.session_id`，5 行程式碼即可解決。
+   - 檔案：`/Users/andy/3rd-party/OpenParty/bridge.py`，約 line 1514
+
+2. **方案 B — prompt_submit.py 讀取上一 turn 的 transcript（兜底）**
+   `UserPromptSubmit` 有 fire，且 turn N+1 觸發時 turn N 的 transcript 已寫入。在 `prompt_submit.py` 中加入讀取上一 turn assistant text 的邏輯，作為方案 A 的備援。
+   - 缺點：延遲一個 turn；最後一個 turn 無法捕捉（沒有 N+1 觸發）
+   - 檔案：`/Users/andy/llm-mem/patrick/src/patrick/hooks/prompt_submit.py`
+
+**patrick 端的 dedup 機制（hash-based）確保兩個方案同時啟用不會產生重複存入。**

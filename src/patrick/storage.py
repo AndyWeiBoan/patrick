@@ -52,6 +52,7 @@ def _tokenize_for_bm25(text: str) -> list[str]:
 
 
 from .config import (
+    ASSISTANT_TEXT_BOOST,
     BM25_B,
     BM25_K1,
     BM25_WEIGHT,
@@ -380,6 +381,30 @@ class Storage:
         except Exception:
             return False
 
+    def fragment_count(self) -> dict[str, int]:
+        """Count .lance fragment files in each table's data/ directory.
+
+        Returns e.g. {"turn_chunks": 42, "session_summaries": 15}.
+        """
+        counts: dict[str, int] = {}
+        for name in ("turn_chunks", "session_summaries"):
+            data_dir = DATA_DIR / f"{name}.lance" / "data"
+            if data_dir.is_dir():
+                counts[name] = sum(1 for f in data_dir.iterdir() if f.suffix == ".lance")
+            else:
+                counts[name] = 0
+        return counts
+
+    def compact(self) -> None:
+        """Compact LanceDB tables to reduce fragment file count."""
+        from datetime import timedelta
+        assert self._initialized
+        for tbl in (self._chunks, self._sessions):
+            try:
+                tbl.optimize(cleanup_older_than=timedelta(0))
+            except Exception as exc:
+                logger.warning("LanceDB compaction failed: %s", exc)
+
     def add_chunks(self, chunks: list[dict]) -> None:
         """Append turn chunks (no upsert — append-only)."""
         assert self._initialized
@@ -585,6 +610,9 @@ class Storage:
                 rrf_score += VECTOR_WEIGHT / (rrf_k + vr + 1)
             if br is not None:
                 rrf_score += BM25_WEIGHT / (rrf_k + br + 1)
+            # Boost assistant responses: higher information density than user prompts
+            if chunk.get("hook_type") == "assistant_text":
+                rrf_score *= ASSISTANT_TEXT_BOOST
             fused.append({
                 **chunk,
                 "_hybrid_score": rrf_score,
