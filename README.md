@@ -81,7 +81,7 @@ Specific advantages:
 
 **Stage 2 — Structured summary (background backfill):**
 A background scheduler picks up sessions marked `pending` and generates a richer summary:
-- **Regular sessions:** `opening` = first user prompt (≤200 chars), `body` = top-5 assistant responses (cosine-deduplicated).
+- **Regular sessions:** `opening` = first user prompt (≤200 chars), `body` = top-5 assistant responses (filtered by cosine ≥ 0.8 diversity threshold to avoid repetitive content).
 - **Multi-agent sessions:** `opening` = discussion topic, `body` = owner's broadcast messages.
 - The combined `opening + body` text is **embedded** using the same fastembed model, and this new vector **replaces** the centroid vector as the Layer 1 search anchor.
 
@@ -91,9 +91,16 @@ A background scheduler picks up sessions marked `pending` and generates a richer
 - Only the top-K matching sessions proceed to Layer 2, where individual chunks are searched for precise answers.
 - This two-layer design avoids searching millions of chunks directly — the session vector acts as a cheap "session-level index" that narrows the search space by 10–100×.
 
-### Deduplication
+### Deduplication (Two-Layer)
+
+**Layer 1 — Exact dedup (on write):**
 - **SHA-256** hash of each text chunk is stored in `turn_chunks.text_hash`.
-- Before any write, `hash_exists()` checks for a collision — duplicate chunks are silently dropped.
+- Before any write, `hash_exists()` checks for a collision — identical chunks are silently dropped.
+
+**Layer 2 — Semantic dedup (on session end):**
+- When a session ends (stop hook), Patrick scans all chunks in that session.
+- Greedy algorithm: iterate chunks newest-first; keep a chunk only if its cosine similarity to **all** already-kept chunks is below 0.95.
+- Chunks exceeding the threshold are **deleted from the database** — this removes paraphrased duplicates that SHA-256 cannot catch.
 
 ### MCP Server
 - **[FastMCP](https://github.com/jlowin/fastmcp)** SSE server on `http://127.0.0.1:3141/sse`
