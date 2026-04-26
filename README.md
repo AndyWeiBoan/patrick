@@ -46,7 +46,7 @@ Specific advantages:
 - **Fully automatic** — `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks run silently in the background without any user action
 - **100% local** — all data stays on your machine in an embedded LanceDB database; no API keys, no network calls
 - **Two-layer retrieval** — coarse session-level filter first, then fine-grained chunk search within matching sessions; much more precise than flat search
-- **Auto session summary** — centroid of all chunk vectors is computed at session end using pure numpy; a representative summary is generated with zero LLM calls
+- **Auto session summary** — two-stage pipeline: immediate centroid at session end, then background backfill generates structured summary (opening + body) and replaces the centroid with a richer embedding — all zero LLM cost
 - **Exact dedup** — SHA-256 hashing prevents storing the same content twice, even across sessions
 
 ---
@@ -168,4 +168,4 @@ Nothing leaves your machine.
 - **Phase 1** ✅: Automatic hook capture, two-layer vector search, centroid session summaries, SHA-256 dedup, MCP server, `patrick setup` / `init` / `doctor` CLI.
 - **Phase 2** ✅: BM25 hybrid search, cross-encoder reranking, cosine semantic dedup, eval harness + CI quality gate.
 - **Phase 3** ✅: Time-decay recency weighting, hook_type classification, multi-value filter.
-- **Phase 4** (in progress): Session summary UI improvements (opening/body fields), summary backfill scheduler.
+- **Phase 4** ✅: Two-stage session summary pipeline (centroid → structured summary backfill), opening/body fields, multi-agent session detection, background summary scheduler.
