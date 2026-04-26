@@ -68,23 +68,28 @@ Specific advantages:
 3. **Graceful degradation** — if fewer than 3 sessions pass the threshold, fall back to a global chunk search across all sessions.
 4. **Context expansion** — for each matched chunk, fetch all sibling chunks from the same `turn_id` to restore full conversational context.
 
-### Session Summary (Centroid Algorithm)
+### Session Summary (Two-Stage Pipeline)
 
-**Why centroid, not LLM summarization?** Patrick's core constraint is zero token cost. Calling an LLM to summarize each session would add latency, API costs, and break the "fully local" promise. Instead, we use a pure-math approach: the centroid (mean) of all chunk vectors in a session is a surprisingly effective "topic fingerprint" — it captures the weighted center of everything discussed, without needing to understand language.
+**Why no LLM summarization?** Patrick's core constraint is zero token cost. Calling an LLM to summarize each session would add latency, API costs, and break the "fully local" promise. Instead, we use a two-stage pipeline that combines pure math with local embeddings — no external API calls.
 
-**How it works — at session end, Patrick:**
+**Stage 1 — Centroid (immediate, at session end):**
 1. Loads all chunk vectors for that session.
 2. Computes the **mean centroid** of all chunk vectors (pure numpy, zero LLM cost).
 3. Finds the top-3 chunks closest to the centroid by cosine similarity.
-4. Concatenates their text as the session's `summary_text`.
-5. Upserts the session row in `session_summaries` with the centroid vector as the Layer 1 search anchor.
+4. Concatenates their text as a provisional `summary_text`.
+5. Upserts the session row with the centroid vector as a **temporary** Layer 1 search anchor.
+
+**Stage 2 — Structured summary (background backfill):**
+A background scheduler picks up sessions marked `pending` and generates a richer summary:
+- **Regular sessions:** `opening` = first user prompt (≤200 chars), `body` = top-5 assistant responses (cosine-deduplicated).
+- **Multi-agent sessions:** `opening` = discussion topic, `body` = owner's broadcast messages.
+- The combined `opening + body` text is **embedded** using the same fastembed model, and this new vector **replaces** the centroid vector as the Layer 1 search anchor.
 
 **How search uses summaries:**
-- At query time, Layer 1 embeds your query and does **cosine similarity search against centroid vectors** in `session_summaries` — this quickly identifies which sessions are semantically relevant.
+- At query time, Layer 1 embeds your query and does **cosine similarity search against session vectors** in `session_summaries` — this quickly identifies which sessions are semantically relevant.
+- For fully processed sessions, the search vector is the embedding of the structured summary (opening + body), which is more semantically meaningful than a raw centroid.
 - Only the top-K matching sessions proceed to Layer 2, where individual chunks are searched for precise answers.
-- This two-layer design avoids searching millions of chunks directly — the centroid acts as a cheap "session-level index" that narrows the search space by 10–100×.
-
-**Phase 4 additions:** For human-readable display, each session also stores an `opening` (first user prompt, ≤200 chars) and `body` (top-5 assistant responses, deduplicated). These fields power the `memory_sessions` listing UI but do **not** affect search — search always uses the centroid vector.
+- This two-layer design avoids searching millions of chunks directly — the session vector acts as a cheap "session-level index" that narrows the search space by 10–100×.
 
 ### Deduplication
 - **SHA-256** hash of each text chunk is stored in `turn_chunks.text_hash`.
