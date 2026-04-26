@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 
 # ── Path setup ───────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).parent.parent
+REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 QUERIES_FILE = REPO_ROOT / "tests" / "eval" / "queries.jsonl"
@@ -63,6 +63,19 @@ def ndcg_at_k(relevant: set[str], retrieved: list[str], k: int = 10) -> float:
     return dcg / idcg if idcg > 0 else 0.0
 
 
+def graded_ndcg_at_k(relevance_map: dict[str, int], retrieved: list[str], k: int = 10) -> float:
+    """nDCG@K with graded relevance: G2 chunks get gain=3, G1 chunks get gain=1."""
+    if not relevance_map:
+        return 0.0
+    dcg = sum(
+        (2 ** relevance_map.get(cid, 0) - 1) / math.log2(rank + 1)
+        for rank, cid in enumerate(retrieved[:k], 1)
+    )
+    ideal_scores = sorted(relevance_map.values(), reverse=True)[:k]
+    idcg = sum((2 ** g - 1) / math.log2(i + 1) for i, g in enumerate(ideal_scores, 1))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
 def mrr(relevant: set[str], retrieved: list[str]) -> float:
     """MRR: reciprocal rank of the first relevant result."""
     for rank, chunk_id in enumerate(retrieved, start=1):
@@ -80,7 +93,8 @@ async def search_direct(
 ) -> list[str]:
     """Call storage layer directly (no server needed).
 
-    Returns list of chunk_ids in ranked order.
+    Returns list of text_hashes in ranked order.
+    text_hash (SHA-256) is stable across DB resets; chunk_id is not.
     """
     from patrick.embedding import provider
     from patrick.storage import storage
@@ -105,11 +119,12 @@ async def search_direct(
         if RERANK_ENABLED and chunks:
             formatted = [{"chunk_id": c.get("chunk_id", ""), "text": c.get("text", "")} for c in chunks]
             reranked = await provider.rerank_async(query=query, candidates=formatted, top_k=top_k)
-            return [c["chunk_id"] for c in reranked]
-        return [c.get("chunk_id", "") for c in chunks[:top_k]]
+            chunk_id_to_hash = {c.get("chunk_id", ""): c.get("text_hash", "") for c in chunks}
+            return [chunk_id_to_hash.get(c["chunk_id"], "") for c in reranked]
+        return [c.get("text_hash", "") for c in chunks[:top_k]]
     else:
         chunks = storage.search_chunks(query_vector=q_vec, top_k=top_k)
-        return [c.get("chunk_id", "") for c in chunks]
+        return [c.get("text_hash", "") for c in chunks]
 
 
 # ── Main eval loop ────────────────────────────────────────────────────────────
@@ -126,12 +141,12 @@ async def run_eval(
     Queries without ground truth (empty relevant_chunk_ids) are skipped
     with a warning — they don't count toward averages.
     """
-    annotated = [q for q in queries if q.get("relevant_chunk_ids")]
-    unannotated = [q for q in queries if not q.get("relevant_chunk_ids")]
+    annotated = [q for q in queries if q.get("relevant_text_hashes")]
+    unannotated = [q for q in queries if not q.get("relevant_text_hashes")]
 
     if unannotated:
         print(f"WARNING: {len(unannotated)} queries have no ground truth and will be skipped.")
-        print("         Annotate relevant_chunk_ids in tests/eval/queries.jsonl first.")
+        print("         Run scripts/eval/annotate_queries.py to populate relevant_text_hashes.")
         print()
 
     if not annotated:
@@ -150,14 +165,15 @@ async def run_eval(
     for q in annotated:
         qid = q["id"]
         query_text = q["query"]
-        relevant = set(q["relevant_chunk_ids"])
+        relevant = set(q["relevant_text_hashes"])
+        relevance_map = q.get("relevance_grades", {})
 
         qt0 = time.perf_counter()
         retrieved = await search_direct(query=query_text, mode=mode, top_k=top_k)
         qt_ms = round((time.perf_counter() - qt0) * 1000, 1)
 
         r_k = recall_at_k(relevant, retrieved, k=top_k)
-        n_k = ndcg_at_k(relevant, retrieved, k=top_k)
+        n_k = graded_ndcg_at_k(relevance_map, retrieved, k=top_k)
         m = mrr(relevant, retrieved)
 
         per_query.append({

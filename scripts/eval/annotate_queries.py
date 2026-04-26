@@ -26,10 +26,10 @@ import textwrap
 from pathlib import Path
 
 # ── path setup ───────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-from src.patrick.config import DATA_DIR, TOP_K_CHUNKS  # noqa: E402
+from patrick.config import DATA_DIR, TOP_K_CHUNKS  # noqa: E402
 
 TOP_CANDIDATES = 5  # default candidates shown per query
 
@@ -40,8 +40,8 @@ async def run_hybrid_search(query: str, top_n: int = 15) -> list[dict]:
     import numpy as np
     from rank_bm25 import BM25Okapi  # type: ignore[import]
 
-    from src.patrick.embedding import provider
-    from src.patrick.storage import _tokenize_for_bm25
+    from patrick.embedding import provider
+    from patrick.storage import _tokenize_for_bm25
 
     provider.initialize()
 
@@ -89,6 +89,7 @@ async def run_hybrid_search(query: str, top_n: int = 15) -> list[dict]:
         results.append(
             {
                 "chunk_id": cid,
+                "text_hash": str(row.get("text_hash", "")),
                 "session_id": row.get("session_id", ""),
                 "text": str(row.get("text", "")),
                 "rrf_score": round(rrf_scores[cid], 5),
@@ -102,13 +103,10 @@ async def main(top_n: int, output_path: Path | None) -> None:
     queries = [json.loads(l) for l in queries_path.read_text().splitlines() if l.strip()]
 
     lines = []
-    lines.append("# C1 Annotation Candidates\n")
-    lines.append(
-        "> For each query, review the candidates and note which chunk_ids are **relevant**.\n"
-    )
-    lines.append(
-        "> Then update `tests/eval/queries.jsonl` — set `relevant_chunk_ids` to the confirmed IDs.\n\n"
-    )
+    lines.append("# Annotation Candidates\n\n")
+    lines.append("> For each query, mark candidates as G2 (highly relevant) or G1 (marginally relevant).\n")
+    lines.append("> Use `text_hash` as the stable identifier — it survives DB resets.\n")
+    lines.append("> Update `tests/eval/queries.jsonl`: set `relevant_text_hashes` and `relevance_grades` (keyed by hash).\n\n")
     lines.append("---\n\n")
 
     annotated = 0
@@ -116,13 +114,13 @@ async def main(top_n: int, output_path: Path | None) -> None:
         qid = q["id"]
         query_text = q["query"]
         lang = q.get("lang", "")
-        existing = q.get("relevant_chunk_ids", [])
+        existing = q.get("relevant_text_hashes", [])
         if existing:
             annotated += 1
 
         lines.append(f"## {qid} | `{query_text}` [{lang}]\n\n")
         if existing:
-            lines.append(f"✅ Already annotated: `{existing}`\n\n")
+            lines.append(f"✅ Already annotated ({len(existing)} hashes)\n\n")
             continue
 
         print(f"Searching: {qid} — {query_text!r} ...", flush=True)
@@ -135,13 +133,17 @@ async def main(top_n: int, output_path: Path | None) -> None:
         lines.append(f"**Candidates (top {len(candidates)}, hybrid search):**\n\n")
         for i, c in enumerate(candidates):
             preview = textwrap.shorten(c["text"], width=200, placeholder="…")
-            lines.append(f"### [{i+1}] `{c['chunk_id']}` (score={c['rrf_score']})\n")
-            lines.append(f"_session: `{str(c['session_id'])[:30]}…`_\n\n")
+            lines.append(f"### [{i+1}] score={c['rrf_score']}\n")
+            lines.append(f"- **text_hash**: `{c['text_hash']}`\n")
+            lines.append(f"- **chunk_id**: `{c['chunk_id']}`\n")
+            lines.append(f"- **session**: `{str(c['session_id'])[:30]}…`\n\n")
             lines.append(f"> {preview}\n\n")
 
-        lines.append(
-            f"**→ Mark relevant IDs:** `[\"chunk_id_1\", \"chunk_id_2\", ...]`\n\n"
-        )
+        lines.append("**→ Paste into queries.jsonl:**\n")
+        lines.append('```json\n')
+        lines.append(f'"relevant_text_hashes": ["hash1", "hash2"],\n')
+        lines.append(f'"relevance_grades": {{"hash1": 2, "hash2": 1}}\n')
+        lines.append('```\n\n')
         lines.append("---\n\n")
 
     print(f"\nAnnotation status: {annotated}/30 already done.")
