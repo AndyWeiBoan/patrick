@@ -18,6 +18,30 @@ _SKIP_TOOLS = {
     "mcp__patrick-memory__memory_deep_search", "mcp__patrick-memory__memory_sessions",
 }
 
+# Bash commands with no semantic value — skip regardless of output length.
+_BASH_NOISE_CMDS = {
+    "git", "ls", "pwd", "echo", "which", "type", "wc", "head", "tail", "cat",
+    "find", "tree", "df", "du", "ps", "top", "env", "printenv",
+}
+_BASH_NOISE_SUBCMDS = {
+    ("git", "status"), ("git", "diff"), ("git", "log"), ("git", "show"),
+    ("git", "branch"), ("git", "stash"),
+}
+_MIN_OUTPUT_CHARS = 100  # bash outputs shorter than this are noise
+
+
+def _is_noise_bash(command: str, output: str) -> bool:
+    parts = command.strip().split()
+    if not parts:
+        return True
+    cmd = parts[0].lower()
+    subcmd = parts[1].lower() if len(parts) > 1 else ""
+    if (cmd, subcmd) in _BASH_NOISE_SUBCMDS:
+        return True
+    if cmd in _BASH_NOISE_CMDS and cmd != "git":
+        return True
+    return len(output.strip()) < _MIN_OUTPUT_CHARS
+
 
 def format_tool_text(tool_name: str, tool_input: dict, tool_response: dict) -> str:
     """Convert raw tool data into natural-language text for better embedding quality."""
@@ -53,10 +77,9 @@ def format_tool_text(tool_name: str, tool_input: dict, tool_response: dict) -> s
             return f"執行了指令：{command}\n結果：{snippet}"
         return f"執行了指令：{command}"
 
-    # --- Read ---
+    # --- Read (skip — file path alone has no semantic value) ---
     if name_lower == "read":
-        file_path = tool_input.get("file_path", tool_input.get("path", ""))
-        return f"讀取了檔案：{file_path}"
+        return ""
 
     # --- Write ---
     if name_lower == "write":
@@ -70,10 +93,9 @@ def format_tool_text(tool_name: str, tool_input: dict, tool_response: dict) -> s
         new = tool_input.get("new_string", "")[:80]
         return f"修改了檔案：{file_path}，舊內容：{old!r}，新內容：{new!r}"
 
-    # --- Glob ---
+    # --- Glob (skip — pattern alone has no semantic value) ---
     if name_lower == "glob":
-        pattern = tool_input.get("pattern", "")
-        return f"搜尋了檔案 glob：{pattern}"
+        return ""
 
     # --- Grep ---
     if name_lower == "grep":
@@ -115,7 +137,14 @@ def main() -> None:
     if len(response_str.encode()) > MAX_OUTPUT_BYTES:
         tool_response = {"content": response_str[:MAX_OUTPUT_BYTES] + "...[truncated]"}
 
+    # P1-5: filter low-value bash before formatting
+    if tool_name.lower() == "bash":
+        if _is_noise_bash(tool_input.get("command", ""), response_str):
+            return
+
     text = format_tool_text(tool_name, tool_input, tool_response)
+    if not text:  # Read / Glob return empty string
+        return
 
     payload = json.dumps({
         "hook": "post-tool-use",
