@@ -58,7 +58,7 @@ Specific advantages:
 - **[PyArrow](https://arrow.apache.org/docs/python/)** — columnar schema, efficient batch inserts, and filter-based table scans.
 
 ### Embeddings
-- **[fastembed](https://github.com/qdrant/fastembed)** + **ONNX Runtime** — runs `multilingual-e5-small` (384-dimensional) fully locally via ONNX. No GPU required. Cold-start in ~1s on Apple Silicon.
+- **[fastembed](https://github.com/qdrant/fastembed)** + **ONNX Runtime** — runs `paraphrase-multilingual-MiniLM-L12-v2` (384-dimensional) fully locally via ONNX. No GPU required. Cold-start in ~1s on Apple Silicon.
 - Supports mixed-language conversations (Chinese + English) out of the box.
 - Heavy I/O-bound embedding work is offloaded to a thread pool via `asyncio.run_in_executor` to avoid blocking the MCP event loop.
 
@@ -82,7 +82,7 @@ At the end of each session, Patrick:
 
 ### MCP Server
 - **[FastMCP](https://github.com/jlowin/fastmcp)** SSE server on `http://127.0.0.1:3141/sse`
-- Exposes 3 tools: `memory_search`, `memory_sessions`, `memory_save` (~~`memory_deep_search`~~ temporarily disabled)
+- Exposes 3 tools: `memory_search`, `memory_sessions`, `memory_save`
 - Custom `/observe` POST endpoint for hook ingestion
 
 ---
@@ -117,15 +117,15 @@ pip install -e .
 patrick init
 ```
 
-This downloads `multilingual-e5-small` (~120 MB) and caches it locally, then runs a quick sanity check to confirm the model and LanceDB are working correctly. Subsequent starts are instant.
+This downloads `paraphrase-multilingual-MiniLM-L12-v2` (~220 MB) and caches it locally, then runs a quick sanity check to confirm the model and LanceDB are working correctly. Subsequent starts are instant.
 
 ```
 Patrick init — downloading embedding model...
-  Model: intfloat/multilingual-e5-small
+  Model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
   Embedding model: ✓ downloaded / cached
   Tokenizer: ✓ loaded
   Sanity check: ✓ embedded 1 text → 384-dim vector
-  LanceDB: ✓ connected at ~/.patrick/db
+  LanceDB: ✓ connected at ~/.patrick/data
 
 ✓ Patrick init complete. Run: patrick start
 ```
@@ -214,7 +214,7 @@ Patrick doctor
   ✓ hooks.Stop
 
 [Embedding model]
-  ✓ Model cached: intfloat/multilingual-e5-small
+  ✓ Model cached: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 
 All checks passed.
 ```
@@ -276,7 +276,7 @@ Logs are available at `/tmp/patrick.log`.
 All memory data is stored locally at:
 
 ```
-~/.patrick/db/
+~/.patrick/data/
 ```
 
 Nothing leaves your machine.
@@ -287,15 +287,15 @@ Nothing leaves your machine.
 
 | Tool | When to use |
 |---|---|
-| `memory_search` | Quick lookup of a specific fact or phrase |
-| ~~`memory_deep_search`~~ | ~~Cross-session context recall (use at session start)~~ — *temporarily disabled* |
-| `memory_sessions` | List all stored sessions with summaries |
+| `memory_search` | Quick lookup of a specific fact or phrase (supports `mode="hybrid"` for BM25+vector fusion) |
+| `memory_sessions` | List all stored sessions with summaries and pagination |
 | `memory_save` | Explicitly save a decision or conclusion (rarely needed — hooks handle most storage) |
 
 ---
 
 ## Project Status
 
-- **Phase 1** (current): Fully working — automatic hook capture, two-layer vector search, centroid session summaries, dedup, MCP server, `patrick setup` / `init` / `doctor` CLI.
-- **Phase 2** (planned): BM25 hybrid search for improved exact-keyword recall in mixed-language conversations.
-- **Phase 3** (planned): Packaging polish, PyPI release.
+- **Phase 1** ✅: Automatic hook capture, two-layer vector search, centroid session summaries, SHA-256 dedup, MCP server, `patrick setup` / `init` / `doctor` CLI.
+- **Phase 2** ✅: BM25 hybrid search, cross-encoder reranking, cosine semantic dedup, eval harness + CI quality gate.
+- **Phase 3** ✅: Time-decay recency weighting, hook_type classification, multi-value filter.
+- **Phase 4** (in progress): Session summary UI improvements (opening/body fields), summary backfill scheduler.

@@ -9,7 +9,7 @@
 1. ~~**拍板向量庫**（先決條件，不能跳過）~~ ✅ **已決定：LanceDB**
 2. **專案骨架**：`patrick/` 目錄結構，`pyproject.toml`，entry point (`server.py`)
 3. **MCP HTTP server 骨架**：
-   - **SSE transport**（非 stdio），一個 `aiohttp` HTTP server 同時提供 MCP endpoint 和 `/observe` hook endpoint，監聯 localhost port（預設 `3112`）
+   - **SSE transport**（非 stdio），一個 HTTP server 同時提供 MCP endpoint 和 `/observe` hook endpoint，監聽 localhost port（預設 `3141`）
    - 4 個 tool schema 定義（先空殼，確認 MCP 能啟動）
    - 共用同一個 `EmbeddingProvider` singleton 和 LanceDB 連線，不重複載入
    - 啟動時加 `SO_REUSEADDR`，port 被佔用時給明確錯誤訊息（避免上次沒正常關 / 開了兩個 instance）
@@ -209,14 +209,14 @@ multilingual-e5-small（Phase 1 起手，輕量優先）
 
 ## Phase 1 開工前置作業（Spike）— 已完成 ✅
 
-1. **✅ 驗證 session_id 來源**（`spikes/spike_session_id.py` PASS — 真實 hook 觸發驗證）：
+1. **✅ 驗證 session_id 來源**（`scripts/research/spike_session_id.py` PASS — 真實 hook 觸發驗證）：
    - 官方文件 + 真實 hook 觸發雙重確認：`stdin['session_id']`（snake_case）是唯一可靠來源
    - 真實觸發結果：`session_id = "4da2ce8c-629d-4d26-b73a-8b315f0414ad"`，來源 `stdin_json['session_id']`，`hook_event_name: "PreToolUse"`
    - `sessionId`（camelCase）：NOT FOUND（官方文件正確，camelCase 不存在）
    - `CLAUDE_SESSION_ID` 環境變數：NOT SET（官方文件確認不存在）
    - 正確優先順序：`stdin['session_id']` → `uuid4()` fallback（無 env var 路徑）
 
-2. **✅ 驗證 LanceDB `merge_insert` 行為**（`spikes/spike_lancedb_merge_insert.py` 全部 PASS）：
+2. **✅ 驗證 LanceDB `merge_insert` 行為**（`scripts/research/spike_lancedb_merge_insert.py` 全部 PASS）：
    - `merge_insert("session_id").when_matched_update_all().when_not_matched_insert_all()` 在 embedded 模式正常運作
    - **重要實作注意**：nullable `source_file` 欄位在 pandas 回傳 `float nan`，非 `None`。所有 null check 必須用 `pd.isna(val)`，不能用 `val is None`
 

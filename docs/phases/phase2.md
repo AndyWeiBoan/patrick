@@ -52,7 +52,7 @@
 | # | 項目 | 驗收 |
 |---|------|------|
 | 1 | `tests/eval/queries.jsonl` | 30 組 query + ground truth，凍結 |
-| 2 | `scripts/eval.py` | 一條指令輸出 Recall@10 / nDCG@10 / MRR |
+| 2 | `scripts/eval/eval.py` | 一條指令輸出 Recall@10 / nDCG@10 / MRR |
 | 3 | BM25 index + hybrid search API | `memory_search` 支援 `mode=hybrid` |
 | 4 | Cross-encoder rerank 模組 | 可開關、可配置 top-N |
 | 5 | 去重 pipeline | session 內 cosine ≥ 0.95 合併 |
@@ -130,7 +130,7 @@
 
 ## 五、Phase 2 完成標準（Definition of Done）
 
-1. `scripts/eval.py` 一條指令可重現所有分數
+1. `scripts/eval/eval.py` 一條指令可重現所有分數
 2. Recall@10 相對 Phase 1 baseline 提升 ≥ 20%
 3. nDCG@10 相對 Phase 1 baseline 提升 ≥ 15%
 4. P95 query latency ≤ 800ms（cross-encoder 打開時；基準硬體：M-series Mac local，cross-encoder 在 CPU 上跑。GPU / 雲端環境需另行標注所用規格並相應調整門檻）
@@ -155,7 +155,7 @@
 
 ### T1｜Eval harness（量化基線）
 - **為什麼做**：Phase 1 只驗證「能跑通」，沒有數字就無法判斷後續任何改動是進步還是退步。
-- **怎麼做**：凍結 30 組 query + 人工 ground truth，`scripts/eval.py` 一鍵輸出 Recall@10 / nDCG@10 / MRR。
+- **怎麼做**：凍結 30 組 query + 人工 ground truth，`scripts/eval/eval.py` 一鍵輸出 Recall@10 / nDCG@10 / MRR。
 - **怎麼驗收**：同一條指令在 CI 跑兩次分數一致；能輸出與上次 baseline 的 diff。
 - **為什麼這樣驗**：可重現 + 可比較是「尺」的最低條件，否則所有後續 KPI 都是幻覺。
 
@@ -242,7 +242,7 @@
 - **位置**：`results/`（目錄空）
 - **問題描述**：`results/phase1_baseline.json` 不存在。若等到 M1 才生，storage 已經跑過 dedup + 新 chunking，資料分布已改變，所謂 +20% KPI 變成跟新環境自己比的偽命題。另外直接 `git checkout 8fe1dbf` 跑 Phase 2 的 `eval.py` 有 **schema 相容性風險**——eval.py 是 Phase 2 新增，Phase 1 commit 的 storage 欄位可能對不上，跑起來要嘛直接爆，要嘛跑出來的數字是錯的。
 - **白話文**：「進步 20%」要跟「以前」比，但「以前」的分數從沒留底；而且現在的資料庫已經不是以前的樣子，再量等於自己騙自己。另外，直接把新考試程式搬回舊資料庫，程式和資料庫規格對不上，會出事。
-- **解法**：採最穩妥做法——在 Phase 1 commit（`8fe1dbf`）上建一個臨時 branch，把 Phase 2 的 `scripts/eval.py` cherry-pick 過去並驗證可跑後，用該 branch 跑出 baseline，再把 `results/phase1_baseline.json` commit 回 main。baseline JSON 必須內嵌 **commit hash / eval.py 版本 / storage schema 版本** 三欄以供追溯。
+- **解法**：採最穩妥做法——在 Phase 1 commit（`8fe1dbf`）上建一個臨時 branch，把 Phase 2 的 `scripts/eval/eval.py` cherry-pick 過去並驗證可跑後，用該 branch 跑出 baseline，再把 `results/phase1_baseline.json` commit 回 main。baseline JSON 必須內嵌 **commit hash / eval.py 版本 / storage schema 版本** 三欄以供追溯。
 - **解法白話文**：回到 Phase 1 那個時空，但把 Phase 2 的考試程式搬過去先試跑一次確定能跑，跑完把分數鎖進檔案並標明「這是用哪個版本在哪個資料庫結構下跑的」，以後才能追。
 - **狀態**：✅ 完成（results/phase1_baseline.json 已凍結，Recall@10=0.2789, nDCG@10=0.2899，2026-04-21）
 
@@ -300,7 +300,7 @@
 - **狀態**：✅ 完成（patrick reindex --wipe 實作，含 drop tables + scan transcripts + re-chunk + re-embed，2026-04-21）
 
 #### H2｜T6 未交付：無 latency histogram，無成本估算腳本
-- **位置**：`scripts/eval.py`（T6 對應腳本缺失）
+- **位置**：`scripts/eval/eval.py`（T6 對應腳本缺失）
 - **問題描述**：T6 要求 latency 直方圖 + re-embedding chunk 數 × 單價明細，`eval.py` 只輸出 `p95_latency_ms` 純量，沒有分布資料，也沒有成本估算腳本。
 - **白話文**：只給一個「最慢的 5% 多慢」的數字，沒有分布圖；也沒算過整庫重建要花多少 API 費用。
 - **解法**：(a) `eval.py --output` JSON 加 `latency_distribution` 分桶欄位；(b) 新增 `scripts/estimate_reembed_cost.py`（chunk count × embedding 單價 × rate limit）。

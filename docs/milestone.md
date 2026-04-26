@@ -79,7 +79,7 @@
 | 向量儲存 | LanceDB（embedded 模式） |
 | 分詞（Phase 2） | `jieba` |
 | Token 計算 | `tokenizers`（HuggingFace，用於 chunk splitting） |
-| HTTP server | `aiohttp`（MCP SSE + `/observe` endpoint 共用同一個 HTTP server，監聽 localhost:3112） |
+| HTTP server | FastMCP + uvicorn（MCP SSE + `/observe` endpoint 共用同一個 HTTP server，監聽 localhost:3141） |
 | Hook 腳本 | Python（`urllib.request` 標準庫，零額外依賴，不依賴 Node.js） |
 
 ## 核心約束（不可破壞）
