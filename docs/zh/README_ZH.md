@@ -5,7 +5,7 @@
 <h1 align="center">Patrick</h1>
 
 <p align="center">
-  <a href="README.md">English</a> &nbsp;|&nbsp; <a href="README_ZH.md"><b>中文</b></a>
+  <a href="../../README.md">English</a> &nbsp;|&nbsp; <a href="README_ZH.md"><b>中文</b></a>
 </p>
 
 <p align="center">

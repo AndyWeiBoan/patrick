@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "src/patrick/**"
-      - "scripts/eval.py"
+      - "scripts/eval/**"
       - "tests/eval/**"
   workflow_dispatch:
     inputs:
@@ -43,14 +43,14 @@ jobs:
 
       - name: Run eval (vector mode)
         run: |
-          python scripts/eval.py \
+          python scripts/eval/eval.py \
             --mode vector \
             --output results/ci_vector_$(git rev-parse --short HEAD).json \
             --verbose
 
       - name: Run eval (hybrid mode)
         run: |
-          python scripts/eval.py \
+          python scripts/eval/eval.py \
             --mode hybrid \
             --output results/ci_hybrid_$(git rev-parse --short HEAD).json \
             --verbose

@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/patrick/hooks/session_start.py",
+            "command": "python3 /path/to/patrick/src/patrick/hooks/session_start.py",
             "async": true
           }
         ]
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/patrick/hooks/prompt_submit.py",
+            "command": "python3 /path/to/patrick/src/patrick/hooks/prompt_submit.py",
             "async": true
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/patrick/hooks/post_tool_use.py",
+            "command": "python3 /path/to/patrick/src/patrick/hooks/post_tool_use.py",
             "async": true
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/patrick/hooks/stop.py",
+            "command": "python3 /path/to/patrick/src/patrick/hooks/stop.py",
             "async": true
           }
         ]
