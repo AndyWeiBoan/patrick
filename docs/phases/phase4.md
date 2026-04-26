@@ -137,3 +137,27 @@ query
 ```
 
 改的只有「vector 裡裝的東西」和「怎麼產生它」，`search_sessions()`、`memory_search` MCP tool、Layer 1 → Layer 2 流程全部不動。
+
+---
+
+## 實作進度
+
+### 已完成
+
+- **`summary.py`** — `generate_summary()` 實作完成。Regular session 取 opening + top-5 assistant body；multi-agent session 取 discussion topic + broadcast。Body 以 cosine ≥ 0.8 多樣性篩選去除重複內容。最終用 `provider.embed_async()` 產生 summary embedding，**覆寫** centroid 向量。
+- **`server.py`** — `_summary_backfill()` 背景排程器實作完成。每 120 秒掃描一次（`SUMMARY_SCAN_INTERVAL`），cooldown 300 秒（`SUMMARY_COOLDOWN`）。兩條路徑：pending 標記 + stale session 發現。
+- **`storage.py`** — `session_summaries` 表已新增 `opening`、`body`、`session_type`、`summary_status` 欄位。`upsert_session_summary()` 支援寫入結構化摘要。`get_sessions_needing_summary()` 實作兩條路徑掃描。`list_sessions()` 支援 `include_body`、`session_type`、`after` 過濾。
+- **`observer.py`** — Stop hook 觸發時標記 `summary_status = "pending"`，同時保留即時 centroid 計算作為臨時搜尋錨點。
+
+### 文件更新（2026-04-26）
+
+- **README（EN/ZH）** — Session Summary 改寫為「兩階段流水線」：Stage 1 centroid（即時）→ Stage 2 結構化摘要（背景回填，覆寫 centroid）。去重機制補充兩層說明（SHA-256 + cosine 語義去重）。MCP 工具表更新（`memory_save` 標示已停用、`memory_search` 補上三種模式和 `hook_type`、`memory_sessions` 補上過濾參數）。安裝流程精簡，完整指南抽到 `docs/INSTALL.md` 和 `docs/zh/INSTALL_ZH.md`。
+- **`tools.py`** — 清除所有 `memory_deep_search` 過時引用。
+- **`docs/phases/phase1.md`** — 修正 port 3112→3141、hook 路徑。
+- **`docs/phases/phase2.md`** — 修正 eval 腳本路徑（5 處）。
+- **`docs/milestone.md`** — 修正 port、server 技術棧（aiohttp→FastMCP+uvicorn）。
+- **檔案結構** — 刪除多餘的頂層 `hooks/`、空的 `data/` 資料夾。`claude_config_example.json` hook 路徑更新。
+
+### 待辦
+
+- 考慮移除 centroid 計算——`generate_summary()` 已可在 stop hook 的 async context 直接呼叫，可省去 `compute_and_upsert_centroid()` 及 6 個呼叫點（約 70 行）。需另開 task 評估。

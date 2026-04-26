@@ -1,10 +1,4 @@
-"""MCP tool implementations — memory_save, memory_search, memory_deep_search, memory_sessions.
-
-Phase 2 additions:
-- memory_search / memory_deep_search accept mode="hybrid" to use BM25+vector fusion
-- Cross-encoder rerank is applied when RERANK_ENABLED=True and mode="hybrid"
-- Latency tracked in response metadata when mode="hybrid"
-"""
+"""MCP tool implementations — memory_search, memory_sessions, memory_save."""
 
 from __future__ import annotations
 
@@ -35,22 +29,9 @@ async def memory_save(
     summary: str | None = None,
     source_file: str | None = None,
 ) -> dict:
-    """Save a memory. Provide summary only for important moments (decisions, conclusions).
-
-    Only call when:
-    (1) User explicitly asks to remember something
-    (2) A major decision or conclusion was reached in this conversation
-    (3) Session is ending and you want to summarize what happened
-    (4) ALWAYS required after memory_deep_search — pass your synthesis as both text and summary.
-
-    Do NOT call for every turn — that wastes tokens.
-    Expected frequency: 0–2 times per session (plus mandatory post-deep-search call).
-
-    summary: 50–1000 character LLM synthesis stored as a searchable hint. It is embedded
-             and used as the Layer 1 search vector, improving future recall accuracy.
+    """Save a memory explicitly. Currently disabled — hooks handle all storage automatically.
 
     session_id: pass the current session's UUID if known (from session-start hook context).
-    If not available, omit — a new UUID will be generated for this standalone memory.
     """
     # memory_save is temporarily disabled to prevent stale hint accumulation.
     # All conversation data is captured automatically via hooks.

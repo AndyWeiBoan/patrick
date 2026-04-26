@@ -434,56 +434,33 @@ class Storage:
     def get_sessions_needing_summary(self, cooldown_seconds: int = 300) -> list[str]:
         """Find sessions needing Phase 4 summary generation.
 
-        Two discovery paths:
-        1. summary_status = 'pending' (regular sessions marked by stop hook)
-        2. summary_status != 'done' AND last chunk older than cooldown
-           (multi-agent sessions where stop hook never fires, or any missed session)
+        Returns session_ids where summary_status = 'pending'.
+        All sessions (regular + multi-agent) get pending status automatically
+        when first created by compute_and_upsert_centroid().
+
+        For historical backfill of sessions created before this change,
+        use the CLI: patrick backfill --all
         """
         assert self._initialized
         col_names = self._sessions.schema.names
         if "summary_status" not in col_names:
             return []
 
-        from datetime import datetime, timedelta, timezone
-
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)).isoformat()
-
         try:
-            session_df = self._sessions.to_pandas()
+            session_df = (
+                self._sessions.search()
+                .where("summary_status = 'pending'")
+                .select(["session_id"])
+                .limit(10_000)
+                .to_pandas()
+            )
         except Exception:
-            session_df = pd.DataFrame()
+            return []
 
-        result: set[str] = set()
+        if session_df.empty:
+            return []
 
-        # Path 1: explicitly pending
-        if not session_df.empty and "summary_status" in session_df.columns:
-            mask = session_df["summary_status"] == "pending"
-            result.update(session_df[mask]["session_id"].tolist())
-
-        # Path 2: stale sessions not yet "done"
-        try:
-            chunk_df = self._chunks.to_pandas()
-            if not chunk_df.empty:
-                session_last_chunk = chunk_df.groupby("session_id")["created_at"].max()
-                stale_sessions = session_last_chunk[session_last_chunk < cutoff].index.tolist()
-
-                done_sessions: set[str] = set()
-                skipped_sessions: set[str] = set()
-                if not session_df.empty and "summary_status" in session_df.columns:
-                    done_sessions = set(
-                        session_df[session_df["summary_status"] == "done"]["session_id"].tolist()
-                    )
-                    skipped_sessions = set(
-                        session_df[session_df["summary_status"] == "skipped"]["session_id"].tolist()
-                    )
-
-                for sid in stale_sessions:
-                    if sid not in done_sessions and sid not in skipped_sessions:
-                        result.add(sid)
-        except Exception as e:
-            logger.warning("Session discovery chunk scan failed: %s", e)
-
-        return list(result)
+        return session_df["session_id"].tolist()
 
     def search_sessions(
         self, query_vector: list[float], top_k: int = TOP_K_SESSIONS
@@ -1011,6 +988,10 @@ class Storage:
         top_indices = np.argsort(sims)[::-1][:top_k]
         summary_text = " | ".join(texts[i] for i in top_indices)
 
+        # Check if session record already exists — new sessions get pending status
+        existing = self.get_session(session_id)
+        pending_status = "pending" if not existing else None  # None = preserve existing
+
         if hint is not None and hint_vector is not None:
             # Agent-supplied hint: centroid text + hint vector for search
             self.upsert_session_summary(
@@ -1018,10 +999,9 @@ class Storage:
                 summary_text=summary_text,
                 vector=hint_vector,
                 hint=hint,
+                summary_status=pending_status,
             )
         else:
-            # No hint from caller — check for existing agent hint
-            existing = self.get_session(session_id)
             if existing and existing.get("hint"):
                 # Preserve existing hint + its vector, only refresh summary text
                 self.update_summary_text_only(session_id, summary_text)
@@ -1031,6 +1011,7 @@ class Storage:
                     session_id=session_id,
                     summary_text=summary_text,
                     vector=centroid.tolist(),
+                    summary_status=pending_status,
                 )
 
         logger.debug("Centroid updated for session %s (%d chunks)", session_id, len(valid))

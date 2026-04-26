@@ -157,9 +157,9 @@ Nothing leaves your machine.
 
 | Tool | When to use |
 |---|---|
-| `memory_search` | Quick lookup of a specific fact or phrase (supports `mode="hybrid"` for BM25+vector fusion) |
-| `memory_sessions` | List all stored sessions with summaries and pagination |
-| `memory_save` | Explicitly save a decision or conclusion (rarely needed — hooks handle most storage) |
+| `memory_search` | Semantic search across all chunks. Modes: `vector` (default), `hybrid` (BM25+vector+rerank), `recency` (hybrid+time-decay). Supports `hook_type` filter (`assistant_text`, `user_prompt`, `tool_use`). |
+| `memory_sessions` | Browse sessions with summaries. Supports `include_body`, `session_type` filter, `after` date filter, pagination (`limit`/`offset`). |
+| `memory_save` | Currently disabled — hooks handle all storage automatically. |
 
 ---
 

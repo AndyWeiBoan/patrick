@@ -160,9 +160,9 @@ patrick start         # 啟動記憶伺服器
 
 | 工具 | 適用場景 |
 |---|---|
-| `memory_search` | 快速查找特定事實或關鍵字（支援 `mode="hybrid"` BM25+向量融合搜尋） |
-| `memory_sessions` | 列出所有 session 及其摘要，支援分頁 |
-| `memory_save` | 明確儲存某個決策或結論（hooks 已自動處理大部分儲存，此工具少用） |
+| `memory_search` | 語義搜尋所有 chunk。模式：`vector`（預設）、`hybrid`（BM25+向量+rerank）、`recency`（hybrid+時間衰減）。支援 `hook_type` 過濾（`assistant_text`、`user_prompt`、`tool_use`）。 |
+| `memory_sessions` | 瀏覽 session 及摘要。支援 `include_body`、`session_type` 過濾、`after` 日期過濾、分頁（`limit`/`offset`）。 |
+| `memory_save` | 目前已停用——hooks 自動處理所有儲存。 |
 
 ---
 
