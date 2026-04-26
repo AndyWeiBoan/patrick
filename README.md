@@ -145,10 +145,10 @@ Patrick setup
 ==================================================
 
 [1/3] Hook scripts
-  ✓ /path/to/patrick/hooks/session_start.py
-  ✓ /path/to/patrick/hooks/prompt_submit.py
-  ✓ /path/to/patrick/hooks/post_tool_use.py
-  ✓ /path/to/patrick/hooks/stop.py
+  ✓ /path/to/patrick/src/patrick/hooks/session_start.py
+  ✓ /path/to/patrick/src/patrick/hooks/prompt_submit.py
+  ✓ /path/to/patrick/src/patrick/hooks/post_tool_use.py
+  ✓ /path/to/patrick/src/patrick/hooks/stop.py
 
 [2/3] Settings file: ~/.claude/settings.json
   ~ Will add mcpServers.patrick-memory
