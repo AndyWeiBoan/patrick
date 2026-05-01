@@ -94,6 +94,7 @@ _SESSION_SCHEMA = pa.schema([
     pa.field("body", pa.string()),           # Phase 4: assistant_text excerpts or broadcast messages
     pa.field("session_type", pa.string()),   # Phase 4: "regular" | "multi_agent"
     pa.field("summary_status", pa.string()), # Phase 4: "pending" | "done" | "skipped"
+    pa.field("project_path", pa.string()),   # Phase 5: normalized absolute cwd at session start
     pa.field("vector", pa.list_(pa.float32(), 384)),
     pa.field("created_at", pa.string()),
     pa.field("updated_at", pa.string()),
@@ -184,6 +185,20 @@ class Storage:
             except Exception as e:
                 logger.error("Phase 4 session_summaries migration failed: %s", e)
 
+            # Phase 5 migration: add project_path
+            try:
+                col_names = self._sessions.schema.names  # refresh after Phase 4 migration
+                if "project_path" not in col_names:
+                    for expr in ("''", "CAST('' AS VARCHAR)", "CAST('' AS TEXT)"):
+                        try:
+                            self._sessions.add_columns({"project_path": expr})
+                            logger.info("Migrated session_summaries: added project_path column")
+                            break
+                        except Exception as e:
+                            logger.warning("add_columns project_path with expr=%s failed: %s", expr, e)
+            except Exception as e:
+                logger.error("Phase 5 session_summaries migration failed: %s", e)
+
         if "turn_chunks" not in existing:
             self._chunks = self._db.create_table(
                 "turn_chunks", schema=_CHUNK_SCHEMA
@@ -242,6 +257,7 @@ class Storage:
         body: str | None = None,
         session_type: str | None = None,
         summary_status: str | None = None,
+        project_path: str | None = None,
     ) -> None:
         """Insert or update a session summary.
 
@@ -249,15 +265,17 @@ class Storage:
         vector: embedding to use for Layer 1 search.
         hint: optional agent LLM synthesis; stored separately.
         opening/body/session_type/summary_status: Phase 4 fields; None = preserve existing.
+        project_path: Phase 5 field; None = preserve existing.
         """
         assert self._initialized
         now = _now()
-        # Check if exists to preserve created_at, hint, and Phase 4 fields
+        # Check if exists to preserve created_at, hint, Phase 4 fields, and Phase 5 fields
         existing_hint = hint  # caller-supplied wins
         existing_opening = opening
         existing_body = body
         existing_session_type = session_type
         existing_summary_status = summary_status
+        existing_project_path = project_path
         created_at = now
         try:
             existing = (
@@ -284,6 +302,10 @@ class Storage:
                 if existing_summary_status is None:
                     raw = existing.iloc[0].get("summary_status")
                     existing_summary_status = None if _is_null(raw) else str(raw)
+                # Phase 5: preserve existing project_path when not explicitly provided
+                if existing_project_path is None:
+                    raw = existing.iloc[0].get("project_path")
+                    existing_project_path = None if _is_null(raw) else str(raw)
         except Exception:
             pass
 
@@ -306,6 +328,8 @@ class Storage:
             row["session_type"] = [existing_session_type or ""]
         if "summary_status" in table_col_names:
             row["summary_status"] = [existing_summary_status or ""]
+        if "project_path" in table_col_names:
+            row["project_path"] = [existing_project_path or ""]
 
         new_data = pa.table(row)
         (
@@ -335,14 +359,47 @@ class Storage:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-            # Phase 4 fields (may not exist in older schemas)
-            for field in ("opening", "body", "session_type", "summary_status"):
+            # Phase 4 + Phase 5 fields (may not exist in older schemas)
+            for field in ("opening", "body", "session_type", "summary_status", "project_path"):
                 if field in row.index:
                     val = row.get(field)
                     result[field] = None if _is_null(val) else str(val)
             return result
         except Exception:
             return None
+
+    def upsert_session_project_path(self, session_id: str, project_path: str) -> None:
+        """Write project_path for a session at session-start time.
+
+        Phase 5: called by observer when hook=session-start fires.
+        - If session row already exists: partial update via .update() (preserves all other fields).
+        - If session row doesn't exist yet: insert placeholder row (will be overwritten by centroid).
+        """
+        assert self._initialized
+        col_names = self._sessions.schema.names
+        if "project_path" not in col_names:
+            return  # Phase 5 migration not run yet
+        now = _now()
+        existing = self.get_session(session_id)
+        if existing:
+            try:
+                self._sessions.update(
+                    where=f"session_id = '{session_id}'",
+                    values={"project_path": project_path, "updated_at": now},
+                )
+                logger.debug("Updated project_path for session %s → %s", session_id, project_path)
+            except Exception as e:
+                logger.warning("upsert_session_project_path update failed for %s: %s", session_id, e)
+        else:
+            # Session row doesn't exist yet — insert placeholder; centroid will fill later
+            self.upsert_session_summary(
+                session_id=session_id,
+                summary_text="",
+                vector=[0.0] * 384,
+                project_path=project_path,
+                summary_status="pending",
+            )
+            logger.debug("Inserted placeholder session row with project_path for %s", session_id)
 
     def get_session_chunks(self, session_id: str) -> list[dict]:
         """Return all turn chunks for a session (ordered by created_at, chunk_index).
@@ -463,9 +520,15 @@ class Storage:
         return session_df["session_id"].tolist()
 
     def search_sessions(
-        self, query_vector: list[float], top_k: int = TOP_K_SESSIONS
+        self,
+        query_vector: list[float],
+        top_k: int = TOP_K_SESSIONS,
+        project_path: str | None = None,
     ) -> list[dict]:
-        """Vector search over session summaries."""
+        """Vector search over session summaries.
+
+        project_path: Phase 5 — if provided, post-filter results to this project only.
+        """
         assert self._initialized
         results = (
             self._sessions.search(query_vector)
@@ -473,7 +536,11 @@ class Storage:
             .limit(top_k)
             .to_pandas()
         )
-        return results.to_dict(orient="records")
+        records = results.to_dict(orient="records")
+        # Phase 5: project_path post-filter (injection-safe — pandas comparison)
+        if project_path:
+            records = [r for r in records if r.get("project_path") == project_path]
+        return records
 
     def list_sessions(
         self,
@@ -482,6 +549,7 @@ class Storage:
         include_body: bool = False,
         session_type: str | None = None,
         after: str | None = None,
+        project_path: str | None = None,
     ) -> dict:
         """Return sessions with metadata, paginated.
 
@@ -491,20 +559,40 @@ class Storage:
             include_body: if True, include full body text; otherwise only opening.
             session_type: filter by "regular" or "multi_agent".
             after: ISO date string (e.g. "2026-04-20"), only sessions created on/after.
+            project_path: Phase 5 — if provided, only return sessions from this project.
+                          Empty string is treated as None (no filter). Comparison is
+                          done via pandas (safe from SQL injection).
 
         Returns:
             {"sessions": [...], "total": int, "limit": int, "offset": int}
         """
         assert self._initialized
         try:
-            df = self._sessions.to_pandas()
-
-            # ── Filtering ────────────────────────────────────────────
-            if session_type and "session_type" in df.columns:
-                df = df[df["session_type"] == session_type]
-
+            # Build LanceDB-level filter for pushdown (injection-safe: no f-string interpolation)
+            filter_parts = []
+            filter_params: dict[str, str] = {}
+            if session_type:
+                escaped = session_type.replace("'", "''")
+                filter_parts.append(f"session_type = '{escaped}'")
             if after:
-                df = df[df["created_at"] >= after]
+                escaped_after = after.replace("'", "''")
+                filter_parts.append(f"created_at >= '{escaped_after}'")
+            if project_path:
+                escaped_pp = project_path.replace("'", "''")
+                filter_parts.append(f"project_path = '{escaped_pp}'")
+            lancedb_filter = " AND ".join(filter_parts) if filter_parts else None
+
+            # LanceDB 0.30.x: to_pandas() does NOT accept a filter kwarg.
+            # Use search().where() for filtered scans; plain to_pandas() for full table.
+            if lancedb_filter:
+                df = (
+                    self._sessions.search()
+                    .where(lancedb_filter, prefilter=True)
+                    .limit(100_000)
+                    .to_pandas()
+                )
+            else:
+                df = self._sessions.to_pandas()
 
             # Sort newest first
             df = df.sort_values("created_at", ascending=False).reset_index(drop=True)
@@ -525,9 +613,10 @@ class Storage:
                     "opening": None,
                     "session_type": None,
                     "summary_status": None,
+                    "project_path": None,
                 }
-                # Phase 4 fields
-                for field in ("opening", "session_type", "summary_status"):
+                # Phase 4 + Phase 5 fields
+                for field in ("opening", "session_type", "summary_status", "project_path"):
                     if field in row.index:
                         val = row.get(field)
                         entry[field] = None if _is_null(val) else str(val)

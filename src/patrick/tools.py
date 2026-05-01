@@ -84,7 +84,8 @@ async def memory_search(
     mode: str = "vector",
     use_recency: bool = False,
     hook_type: str | list[str] | None = None,
-) -> list[dict] | dict:
+    project_path: str | None = None,
+) -> dict:
     """Fast semantic search — directly searches all turn chunks.
 
     Use for: quick lookup of a specific fact or phrase.
@@ -102,9 +103,30 @@ async def memory_search(
         "tool_use"       — only tool call records
         ["assistant_text", "user_prompt"] — pass a list to match multiple types
         None (default)   — no filter, search all chunks
+    project_path: Phase 5 — absolute path of the project directory (e.g. "/Users/andy/my-project").
+        If provided, search is restricted to chunks from sessions in that project only.
+        Two-stage: first fetches all session_ids for the project, then searches within them.
+        All three search modes (vector, hybrid, recency) respect this filter.
+        Empty string or None (default) = search across all sessions.
     """
     t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
+
+    # Phase 5: resolve project_path → session_ids for all three code paths
+    project_session_ids: list[str] | None = None
+    project_filter_applied = False
+    if project_path:
+        result = storage.list_sessions(project_path=project_path, limit=0)
+        project_session_ids = [s["session_id"] for s in result.get("sessions", [])]
+        if project_session_ids:
+            project_filter_applied = True
+        else:
+            # No sessions found for this project — fallback to global search
+            project_session_ids = None
+            logger.debug(
+                "memory_search: no sessions found for project_path=%r, falling back to global",
+                project_path,
+            )
 
     if use_recency:
         # Time-decay path: hybrid search re-ranked by recency
@@ -113,6 +135,7 @@ async def memory_search(
             query_text=query,
             top_k=top_k,
             hook_type=hook_type,
+            session_ids=project_session_ids,
         )
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         return {
@@ -120,6 +143,7 @@ async def memory_search(
             "mode": "recency",
             "rerank_applied": False,
             "latency_ms": latency_ms,
+            "project_filter_applied": project_filter_applied,
         }
     elif mode == "hybrid":
         # Hybrid: vector + BM25 fusion, then optional cross-encoder rerank
@@ -130,6 +154,7 @@ async def memory_search(
             top_k=recall_n,  # retrieve more for reranker
             recall_n=recall_n,
             hook_type=hook_type,
+            session_ids=project_session_ids,
         )
         if RERANK_ENABLED and candidates:
             reranked = await provider.rerank_async(
@@ -147,11 +172,24 @@ async def memory_search(
             "mode": "hybrid",
             "rerank_applied": RERANK_ENABLED and bool(candidates),
             "latency_ms": latency_ms,
+            "project_filter_applied": project_filter_applied,
         }
     else:
-        # Vector-only (original behaviour)
-        results = storage.search_chunks(query_vector=vectors[0], top_k=top_k, hook_type=hook_type)
-        return _format_chunks(results)
+        # Vector-only (original behaviour) — always returns dict for consistent API
+        results = storage.search_chunks(
+            query_vector=vectors[0],
+            top_k=top_k,
+            hook_type=hook_type,
+            session_ids=project_session_ids,
+        )
+        formatted = _format_chunks(results)
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "results": formatted,
+            "mode": "vector",
+            "latency_ms": latency_ms,
+            "project_filter_applied": project_filter_applied,
+        }
 
 
 async def memory_deep_search(
@@ -309,6 +347,7 @@ async def memory_sessions(
     include_body: bool = False,
     session_type: str | None = None,
     after: str | None = None,
+    project_path: str | None = None,
 ) -> dict:
     """Browse conversation history. Start here for 'what did we work on?' or 'which session covered X?'.
 
@@ -323,8 +362,12 @@ async def memory_sessions(
         session_type: "regular" (1-on-1 Claude session) or "multi_agent" (discussion room).
                       None (default) = all types.
         after: ISO date string, e.g. "2026-04-20". Only sessions created on/after this date.
+        project_path: Phase 5 — absolute path of the project directory (e.g. "/Users/andy/my-project").
+                      If provided, only sessions started from that directory are returned.
+                      Empty string or None (default) = return sessions from all projects.
 
-    Returns: {sessions: [{session_id, created_at, opening, session_type, summary_status, ...}],
+    Returns: {sessions: [{session_id, created_at, opening, session_type, summary_status,
+                          project_path, ...}],
               total: int, limit: int, offset: int}
 
     Typical usage:
@@ -332,14 +375,18 @@ async def memory_sessions(
         memory_sessions(limit=10, session_type="regular")        → recent regular sessions
         memory_sessions(after="2026-04-24", include_body=True)   → recent sessions with full detail
         memory_sessions(limit=0)                                 → all sessions (opening only)
+        memory_sessions(project_path="/Users/andy/my-project")   → only this project's sessions
     """
-    return storage.list_sessions(
+    result = storage.list_sessions(
         limit=limit,
         offset=offset,
         include_body=include_body,
         session_type=session_type,
         after=after,
+        project_path=project_path or None,
     )
+    result["project_filter_applied"] = bool(project_path)
+    return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

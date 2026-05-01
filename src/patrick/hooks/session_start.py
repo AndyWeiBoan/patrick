@@ -24,9 +24,15 @@ def main() -> None:
     if not session_id:
         return  # no session_id, nothing to register
 
+    # Phase 5: capture cwd at session start for project-scoped memory.
+    # Normalisation (expanduser + realpath) happens server-side in observer.py.
+    # Graceful fallback to "" if cwd is not in payload (older Claude Code).
+    project_path = data.get("cwd", "")
+
     payload = json.dumps({
         "hook": "session-start",
         "session_id": session_id,
+        "project_path": project_path,
     }).encode()
 
     try:

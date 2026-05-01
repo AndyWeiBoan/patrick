@@ -63,6 +63,22 @@ async def _process_item(item: dict) -> None:
     role = item.get("role", "user")
     source = "hook"
 
+    # Phase 5: session-start hook — record project_path immediately.
+    # This fires before any chunks exist, so we write a minimal placeholder row
+    # (or update the project_path on an existing row). Centroid will fill in
+    # summary_text / vector later and will preserve project_path via read-then-merge.
+    if hook == "session-start" and session_id:
+        import os
+        raw = item.get("project_path", "")
+        # Normalize: resolve symlinks and expand ~; empty string stays empty.
+        project_path = os.path.realpath(os.path.expanduser(raw)) if raw else ""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, storage.upsert_session_project_path, session_id, project_path
+        )
+        logger.debug("session-start: wrote project_path=%r for session %s", project_path, session_id)
+        return
+
     # stop hook carries no text but should trigger a final centroid update
     # so session_summaries reflects the completed session state.
     # Phase 2: also run session-level cosine dedup on stop.
