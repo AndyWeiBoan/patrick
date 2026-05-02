@@ -74,3 +74,20 @@ RECENCY_BLEND: float = 1.0           # recency influence (0=ignore time, 1=full 
 # ── Phase 4: Session Summary ─────────────────────────────────────────────────
 SUMMARY_SCAN_INTERVAL: int = 120   # seconds between summary backfill scans (2 min)
 SUMMARY_COOLDOWN: int = 300        # seconds since last chunk before treating session as complete (5 min)
+
+# ── Phase 6: Clustering ───────────────────────────────────────────────────────
+# Parameters determined by Task 4 spike on 6359 real Patrick chunks:
+# mcs=10, ms=3 → 190 clusters, 18.1% noise, semantically clear representative texts
+# Compared to 384D baseline: 20D UMAP pipeline reduces noise from 56.6% → 18.9%
+CLUSTER_MIN_CLUSTER_SIZE: int = 10  # HDBSCAN min_cluster_size
+CLUSTER_MIN_SAMPLES: int = 3        # HDBSCAN min_samples
+CLUSTER_UMAP_N_NEIGHBORS: int = 15  # UMAP n_neighbors (clamped to N-1 if N small)
+CLUSTER_UMAP_MIN_DIST: float = 0.1  # UMAP min_dist
+CLUSTER_UMAP_RANDOM_STATE: int = 42 # fixed seed for reproducibility
+
+# ── Phase 6: Dashboard ────────────────────────────────────────────────────────
+DASHBOARD_TEXT_PREVIEW_LEN: int = 120   # /dashboard/api/clusters text_preview chars
+DASHBOARD_SESSION_SUMMARY_LEN: int = 100  # /dashboard/api/sessions summary_preview chars
+
+# ── Phase 6: Auto-recluster ───────────────────────────────────────────────────
+AUTO_RECLUSTER_INTERVAL: int = 300   # seconds between auto-recluster checks (5 min)

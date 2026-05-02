@@ -15,6 +15,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 from .config import (
+    AUTO_RECLUSTER_INTERVAL,
     COMPACT_CHECK_INTERVAL,
     COMPACT_FRAGMENT_THRESHOLD,
     HOST,
@@ -23,6 +24,21 @@ from .config import (
     SUMMARY_SCAN_INTERVAL,
 )
 from .embedding import provider
+from pathlib import Path
+
+from starlette.responses import FileResponse
+
+from .dashboard import (
+    _recluster_running,
+    _run_recluster,
+    dashboard_chunk_detail,
+    dashboard_cluster_config,
+    dashboard_clusters,
+    dashboard_projects,
+    dashboard_recluster,
+    dashboard_recluster_status,
+    dashboard_sessions,
+)
 from .observer import observe_handler, start_worker
 from .storage import storage
 from .summary import generate_summary
@@ -66,6 +82,27 @@ mcp.tool()(memory_save)
 
 # Register /observe custom route
 mcp.custom_route("/observe", methods=["POST"])(observe_handler)
+
+# ── Phase 6: Dashboard routes ──────────────────────────────────────────────
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+async def dashboard_page(request):
+    """GET /dashboard — serve the dashboard HTML page."""
+    return FileResponse(_STATIC_DIR / "dashboard.html")
+
+
+mcp.custom_route("/dashboard", methods=["GET"])(dashboard_page)
+
+# ── Phase 6: Dashboard API routes ─────────────────────────────────────────────
+mcp.custom_route("/dashboard/api/projects", methods=["GET"])(dashboard_projects)
+mcp.custom_route("/dashboard/api/sessions", methods=["GET"])(dashboard_sessions)
+mcp.custom_route("/dashboard/api/clusters", methods=["GET"])(dashboard_clusters)
+mcp.custom_route("/dashboard/api/cluster-config", methods=["GET", "PUT"])(dashboard_cluster_config)
+mcp.custom_route("/dashboard/api/recluster", methods=["POST"])(dashboard_recluster)
+mcp.custom_route("/dashboard/api/recluster-status", methods=["GET"])(dashboard_recluster_status)
+mcp.custom_route("/dashboard/api/chunk/{chunk_id}", methods=["GET"])(dashboard_chunk_detail)
 
 
 # ── Scheduled compaction ──────────────────────────────────────────────────────
@@ -170,6 +207,84 @@ def start_summary_scheduler() -> None:
     )
 
 
+# ── Phase 6: Auto-recluster scheduler ────────────────────────────────────────
+
+_recluster_scheduler_task: asyncio.Task | None = None
+
+
+async def _scheduled_recluster() -> None:
+    """Every AUTO_RECLUSTER_INTERVAL seconds, recluster projects with new chunks.
+
+    A project is skipped when:
+    - Its recluster is already running
+    - Its latest chunk timestamp is older than or equal to last_clustered_at
+      (i.e. no new data since the last run)
+    """
+    await asyncio.sleep(30)  # let server fully settle on startup
+    while True:
+        await asyncio.sleep(AUTO_RECLUSTER_INTERVAL)
+        try:
+            loop = asyncio.get_running_loop()
+            projects = await loop.run_in_executor(None, storage.get_project_stats)
+            for p in projects:
+                project_path = p["project_path"]
+
+                if _recluster_running.get(project_path):
+                    logger.debug("Auto-recluster: %s already running, skipping", project_path)
+                    continue
+
+                # Determine when this project was last clustered
+                cfg = await loop.run_in_executor(
+                    None, storage.get_cluster_config, project_path
+                )
+                last_clustered_at: str | None = cfg["last_clustered_at"] if cfg else None
+
+                # Find the latest chunk timestamp across all project sessions
+                sessions = await loop.run_in_executor(
+                    None, storage.get_sessions_for_project, project_path
+                )
+                if not sessions:
+                    continue
+
+                latest_chunk_ts: str | None = max(
+                    (s["last_ts"] for s in sessions if s.get("last_ts")),
+                    default=None,
+                )
+                if not latest_chunk_ts:
+                    continue
+
+                # Recluster if never done or if new chunks have arrived since last run
+                needs_recluster = (
+                    last_clustered_at is None
+                    or latest_chunk_ts > last_clustered_at
+                )
+
+                if needs_recluster:
+                    logger.info(
+                        "Auto-recluster: triggering for %s "
+                        "(last_clustered=%s, latest_chunk=%s)",
+                        project_path, last_clustered_at, latest_chunk_ts,
+                    )
+                    _recluster_running[project_path] = True
+                    loop.create_task(_run_recluster(project_path))
+                else:
+                    logger.debug(
+                        "Auto-recluster: %s up to date, skipping", project_path
+                    )
+        except Exception as exc:
+            logger.warning("Auto-recluster scheduler error: %s", exc)
+
+
+def start_recluster_scheduler() -> None:
+    """Start the periodic auto-recluster background task."""
+    global _recluster_scheduler_task
+    loop = asyncio.get_running_loop()
+    _recluster_scheduler_task = loop.create_task(_scheduled_recluster())
+    logger.info(
+        "Auto-recluster scheduler started (interval=%ds)", AUTO_RECLUSTER_INTERVAL
+    )
+
+
 # ── Startup / shutdown ────────────────────────────────────────────────────────
 
 def _check_port(host: str, port: int) -> None:
@@ -216,9 +331,10 @@ def main() -> None:
     _orig_startup = server.startup
 
     async def _patched_startup(sockets=None):
-        start_worker()              # observer batch worker
-        start_compact_scheduler()   # periodic LanceDB compaction
-        start_summary_scheduler()   # Phase 4 summary backfill
+        start_worker()                 # observer batch worker
+        start_compact_scheduler()      # periodic LanceDB compaction
+        start_summary_scheduler()      # Phase 4 summary backfill
+        start_recluster_scheduler()    # Phase 6 auto-recluster
         await _orig_startup(sockets)
 
     server.startup = _patched_startup

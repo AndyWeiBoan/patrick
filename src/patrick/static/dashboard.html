@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Patrick Memory Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Layout ── */
+  #layout { display: flex; flex: 1; overflow: hidden; }
+  #sidebar { width: 280px; min-width: 220px; background: #1a1d27; border-right: 1px solid #2d3148; display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #chart-wrap { flex: 1; min-height: 0; }
+  #detail-panel { height: 200px; background: #1a1d27; border-top: 1px solid #2d3148; padding: 12px 16px; overflow-y: auto; font-size: 12px; }
+  #statusbar { height: 28px; background: #12151f; border-top: 1px solid #2d3148; display: flex; align-items: center; padding: 0 16px; font-size: 11px; color: #718096; gap: 24px; flex-shrink: 0; }
+
+  /* ── Sidebar sections ── */
+  #sidebar-header { padding: 14px 16px; border-bottom: 1px solid #2d3148; font-size: 14px; font-weight: 600; color: #a0aec0; letter-spacing: 0.05em; }
+  #project-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+  #param-panel { border-top: 1px solid #2d3148; padding: 12px 16px; flex-shrink: 0; }
+
+  /* ── Project items ── */
+  .project-item { padding: 8px 16px 8px 10px; display: flex; align-items: center; gap: 4px; border-left: 3px solid transparent; transition: all 0.15s; }
+  .project-item:hover { background: #252840; }
+  .project-item.active { background: #252840; border-left-color: #6c8aff; }
+  .project-toggle { flex-shrink: 0; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: #718096; cursor: pointer; font-size: 13px; user-select: none; transition: color 0.12s; border-radius: 3px; }
+  .project-toggle:hover { color: #e2e8f0; background: #2d3148; }
+  .project-item-content { flex: 1; min-width: 0; cursor: pointer; }
+  .project-name { font-size: 13px; font-weight: 500; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .project-meta { font-size: 11px; color: #718096; margin-top: 2px; }
+  .session-container { display: none; }
+  .session-container.expanded { display: block; }
+
+  /* ── Session list ── */
+  .session-list { padding: 4px 0 4px 12px; border-left: 2px solid #2d3148; margin: 4px 16px 4px 28px; }
+  .session-item { padding: 5px 8px; cursor: pointer; border-radius: 4px; font-size: 11px; color: #a0aec0; margin-bottom: 2px; transition: background 0.12s; }
+  .session-item:hover { background: #1e2235; color: #e2e8f0; }
+  .session-item.active { background: #1e2235; color: #6c8aff; }
+  .session-item .session-meta { color: #4a5568; font-size: 10px; margin-top: 1px; }
+  .all-chunks-btn { display: block; margin: 4px 16px 4px 28px; padding: 4px 8px; background: #1e2235; border: 1px solid #2d3148; border-radius: 4px; font-size: 11px; color: #a0aec0; cursor: pointer; text-align: center; transition: all 0.12s; }
+  .all-chunks-btn:hover { background: #252840; color: #e2e8f0; }
+
+  /* ── Param panel ── */
+  .param-title { font-size: 11px; font-weight: 600; color: #718096; letter-spacing: 0.04em; margin-bottom: 8px; cursor: pointer; user-select: none; }
+  .param-title::before { content: '▾ '; }
+  .param-title.collapsed::before { content: '▸ '; }
+  .param-body { display: flex; flex-direction: column; gap: 6px; }
+  .param-body.hidden { display: none; }
+  .param-row { display: flex; align-items: center; gap: 6px; }
+  .param-row label { font-size: 11px; color: #a0aec0; width: 110px; flex-shrink: 0; }
+  .param-row input[type=number] { flex: 1; background: #0f1117; border: 1px solid #2d3148; border-radius: 4px; padding: 3px 6px; color: #e2e8f0; font-size: 11px; min-width: 0; }
+  .btn-row { display: flex; gap: 6px; margin-top: 6px; }
+  .btn { padding: 5px 10px; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; transition: all 0.12s; }
+  .btn-save { background: #2d4a8a; color: #e2e8f0; }
+  .btn-save:hover { background: #3a5ca8; }
+  .btn-recluster { background: #2d4a2d; color: #e2e8f0; flex: 1; }
+  .btn-recluster:hover { background: #3a5c3a; }
+  .btn-recluster:disabled { opacity: 0.5; cursor: not-allowed; }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #4a8a4a; border-top-color: #8aff8a; border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 4px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Detail panel ── */
+  #detail-panel h4 { font-size: 12px; font-weight: 600; color: #a0aec0; margin-bottom: 8px; }
+  #detail-content { color: #cbd5e0; line-height: 1.5; }
+  #detail-content .meta { color: #4a5568; font-size: 11px; margin-bottom: 4px; }
+  #detail-content .text { color: #e2e8f0; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  #detail-content .summary { color: #718096; font-size: 11px; margin-top: 8px; border-top: 1px solid #2d3148; padding-top: 6px; }
+
+  /* ── Empty states ── */
+  .empty-msg { color: #4a5568; font-size: 12px; text-align: center; padding: 24px 16px; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3d4168; }
+</style>
+</head>
+<body>
+
+<div id="layout">
+  <!-- Left sidebar -->
+  <div id="sidebar">
+    <div id="sidebar-header">🧠 Patrick Memory</div>
+    <div id="project-list">
+      <div class="empty-msg" id="project-loading">Loading projects…</div>
+    </div>
+    <div id="param-panel">
+      <div class="param-title" id="param-toggle">Cluster Params</div>
+      <div class="param-body" id="param-body">
+        <div class="param-row">
+          <label>min_cluster_size</label>
+          <input type="number" id="p-mcs" min="2" max="200" value="10">
+        </div>
+        <div class="param-row">
+          <label>min_samples</label>
+          <input type="number" id="p-ms" min="1" max="50" value="3">
+        </div>
+        <div class="param-row">
+          <label>umap_n_neighbors</label>
+          <input type="number" id="p-nn" min="2" max="200" value="15">
+        </div>
+        <div class="param-row">
+          <label>umap_min_dist</label>
+          <input type="number" id="p-md" min="0" max="1" step="0.05" value="0.1">
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-save" id="btn-save" onclick="saveConfig()">Save</button>
+          <button class="btn btn-recluster" id="btn-recluster" onclick="triggerRecluster()">Re-cluster</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main area -->
+  <div id="main">
+    <div id="chart-wrap"></div>
+    <div id="detail-panel">
+      <h4>Chunk Detail</h4>
+      <div id="detail-content"><div class="meta">Click a point to view chunk details</div></div>
+    </div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span id="st-chunks">— chunks</span>
+  <span id="st-clusters">— clusters</span>
+  <span id="st-noise">— noise</span>
+  <span id="st-session">All sessions</span>
+  <span id="st-project" style="margin-left:auto; color: #4a5568;"></span>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let allPoints = [];           // full cluster data for current project
+let allTraces = [];           // plotly traces for full view
+let currentProject = null;
+let currentSession = null;
+let pollTimer = null;
+
+// ── Cluster colours ────────────────────────────────────────────────────────
+const PALETTE = [
+  '#6c8aff','#ff6c8a','#8affb0','#ffd06c','#c06cff',
+  '#6cd9ff','#ff946c','#b0ff6c','#ff6cc0','#6cffd9',
+  '#ffa06c','#6cbaff','#e6ff6c','#ff6ca0','#6cffe6',
+  '#ff6c6c','#6cff8a','#ff8a6c','#8a6cff','#6cffa0',
+];
+const NOISE_COLOR = '#444a5a';
+
+function clusterColor(cid) {
+  if (cid === null || cid === undefined || cid < 0) return NOISE_COLOR;
+  return PALETTE[cid % PALETTE.length];
+}
+
+// ── API helpers ────────────────────────────────────────────────────────────
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    const data = await api('/dashboard/api/projects');
+    renderProjects(data.projects || []);
+  } catch(e) {
+    document.getElementById('project-loading').textContent = 'Failed to load projects.';
+    console.error(e);
+  }
+}
+
+// ── Projects ───────────────────────────────────────────────────────────────
+function renderProjects(projects) {
+  const el = document.getElementById('project-list');
+  if (!projects.length) {
+    el.innerHTML = '<div class="empty-msg">No projects found.<br>Run sessions first.</div>';
+    return;
+  }
+  el.innerHTML = '';
+  projects.forEach(p => {
+    const name = p.project_path.split('/').pop() || p.project_path;
+
+    // Project row: [▸ toggle] [name + meta]
+    const div = document.createElement('div');
+    div.className = 'project-item';
+    div.dataset.path = p.project_path;
+
+    const toggle = document.createElement('span');
+    toggle.className = 'project-toggle';
+    toggle.textContent = '▸';
+    toggle.title = 'Toggle sessions';
+
+    const content = document.createElement('div');
+    content.className = 'project-item-content';
+    content.innerHTML = `<div class="project-name" title="${p.project_path}">${name}</div>
+      <div class="project-meta">${p.session_count} session${p.session_count !== 1 ? 's' : ''}</div>`;
+
+    div.appendChild(toggle);
+    div.appendChild(content);
+
+    // Session container (sibling immediately after the project row)
+    const container = document.createElement('div');
+    container.className = 'session-container';
+    container.dataset.path = p.project_path;
+
+    // Arrow click: collapse / expand session list (no scatter switch)
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const expanded = container.classList.toggle('expanded');
+      toggle.textContent = expanded ? '▾' : '▸';
+    });
+
+    // Name click: switch scatter plot to this project
+    content.addEventListener('click', () => selectProject(p.project_path, div));
+
+    el.appendChild(div);
+    el.appendChild(container);
+  });
+}
+
+async function selectProject(projectPath, el) {
+  // Update active state
+  document.querySelectorAll('.project-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  currentProject = projectPath;
+  currentSession = null;
+
+  document.getElementById('st-project').textContent = projectPath;
+  document.getElementById('detail-content').innerHTML = '<div class="meta">Click a point to view chunk details</div>';
+
+  // Load cluster config
+  loadClusterConfig(projectPath);
+
+  // Load sessions + clusters in parallel
+  const sessionsP = api(`/dashboard/api/sessions?project_path=${encodeURIComponent(projectPath)}`);
+  const clustersP = api(`/dashboard/api/clusters?project_path=${encodeURIComponent(projectPath)}`);
+
+  // Render sessions in sidebar
+  sessionsP.then(data => renderSessions(data.sessions || [], projectPath, el))
+           .catch(e => console.error('sessions error', e));
+
+  // Render scatter plot
+  try {
+    const data = await clustersP;
+    allPoints = data.points || [];
+    renderScatter(allPoints, null);
+    updateStatus(data.total_chunks, data.n_clusters, data.noise_count, 'All sessions');
+  } catch(e) {
+    console.error('clusters error', e);
+    clearScatter('No cluster data. Run: patrick cluster ' + projectPath);
+  }
+}
+
+// ── Sessions sidebar ───────────────────────────────────────────────────────
+function renderSessions(sessions, projectPath, projectEl) {
+  // Collapse all other session containers, clearing their contents
+  document.querySelectorAll('.session-container').forEach(c => {
+    if (c.dataset.path !== projectPath) {
+      c.classList.remove('expanded');
+      c.innerHTML = '';
+      const row = document.querySelector(`.project-item[data-path="${CSS.escape(c.dataset.path)}"] .project-toggle`);
+      if (row) row.textContent = '▸';
+    }
+  });
+
+  // Find this project's container
+  const container = document.querySelector(`.session-container[data-path="${CSS.escape(projectPath)}"]`);
+  if (!container) return;
+  container.innerHTML = '';
+
+  if (!sessions.length) return;
+
+  const allBtn = document.createElement('button');
+  allBtn.className = 'all-chunks-btn';
+  allBtn.textContent = '⊙ All chunks';
+  allBtn.addEventListener('click', () => {
+    currentSession = null;
+    renderScatter(allPoints, null);
+    document.querySelectorAll('.session-item').forEach(e => e.classList.remove('active'));
+    updateStatus(allPoints.length,
+      new Set(allPoints.filter(p => p.cluster_id >= 0).map(p => p.cluster_id)).size,
+      allPoints.filter(p => p.cluster_id === -1).length, 'All sessions');
+  });
+  container.appendChild(allBtn);
+
+  const list = document.createElement('div');
+  list.className = 'session-list';
+  sessions.forEach(s => {
+    const item = document.createElement('div');
+    item.className = 'session-item';
+    item.dataset.sid = s.session_id;
+    const ts = s.first_ts ? new Date(s.first_ts).toLocaleDateString() : '';
+    item.innerHTML = `<div>${s.summary_preview || s.session_id.slice(0,8)+'…'}</div>
+      <div class="session-meta">${ts} · ${s.chunk_count} chunks</div>`;
+    item.addEventListener('click', () => selectSession(s.session_id, item));
+    list.appendChild(item);
+  });
+  container.appendChild(list);
+
+  // Auto-expand this project's session container
+  container.classList.add('expanded');
+  const toggle = projectEl.querySelector('.project-toggle');
+  if (toggle) toggle.textContent = '▾';
+}
+
+function selectSession(sessionId, el) {
+  document.querySelectorAll('.session-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  currentSession = sessionId;
+  renderScatter(allPoints, sessionId);
+
+  const sessPoints = allPoints.filter(p => p.session_id === sessionId);
+  const cids = new Set(sessPoints.filter(p => p.cluster_id >= 0).map(p => p.cluster_id));
+  updateStatus(sessPoints.length, cids.size, sessPoints.filter(p => p.cluster_id === -1).length,
+    `Session: ${sessionId.slice(0,8)}…`);
+}
+
+// ── Scatter plot ───────────────────────────────────────────────────────────
+function buildTraces(points, highlightSession) {
+  if (!points.length) return [];
+
+  if (highlightSession) {
+    const sel = points.filter(p => p.session_id === highlightSession);
+    const rest = points.filter(p => p.session_id !== highlightSession);
+
+    const selTrace = {
+      type: 'scattergl', mode: 'markers',
+      x: sel.map(p => p.x), y: sel.map(p => p.y),
+      marker: {
+        color: sel.map(p => clusterColor(p.cluster_id)),
+        size: 6, opacity: 1.0,
+      },
+      text: sel.map(p => makeHover(p)),
+      hovertemplate: '%{text}<extra></extra>',
+      customdata: sel.map(p => p.chunk_id),
+      name: 'Selected session',
+      showlegend: false,
+    };
+
+    const restTrace = {
+      type: 'scattergl', mode: 'markers',
+      x: rest.map(p => p.x), y: rest.map(p => p.y),
+      marker: { color: '#2a2e3e', size: 4, opacity: 0.4 },
+      text: rest.map(p => makeHover(p)),
+      hovertemplate: '%{text}<extra></extra>',
+      customdata: rest.map(p => p.chunk_id),
+      name: 'Other sessions',
+      showlegend: false,
+    };
+
+    return [restTrace, selTrace];
+  }
+
+  // Full view: one trace per cluster (for legend)
+  const byCluster = {};
+  points.forEach(p => {
+    const key = p.cluster_id === null || p.cluster_id < 0 ? -1 : p.cluster_id;
+    if (!byCluster[key]) byCluster[key] = [];
+    byCluster[key].push(p);
+  });
+
+  const traces = [];
+  // Noise first (renders behind)
+  if (byCluster[-1]) {
+    const pts = byCluster[-1];
+    traces.push({
+      type: 'scattergl', mode: 'markers',
+      x: pts.map(p => p.x), y: pts.map(p => p.y),
+      marker: { color: NOISE_COLOR, size: 5, opacity: 0.7 },
+      text: pts.map(p => makeHover(p)),
+      hovertemplate: '%{text}<extra></extra>',
+      customdata: pts.map(p => p.chunk_id),
+      name: 'Noise',
+      showlegend: false,
+    });
+    delete byCluster[-1];
+  }
+  // Clusters
+  Object.entries(byCluster).forEach(([cid, pts]) => {
+    const color = clusterColor(parseInt(cid));
+    traces.push({
+      type: 'scattergl', mode: 'markers',
+      x: pts.map(p => p.x), y: pts.map(p => p.y),
+      marker: { color, size: 5, opacity: 0.8 },
+      text: pts.map(p => makeHover(p)),
+      hovertemplate: '%{text}<extra></extra>',
+      customdata: pts.map(p => p.chunk_id),
+      name: `Cluster ${cid}`,
+      showlegend: false,
+    });
+  });
+
+  return traces;
+}
+
+function makeHover(p) {
+  const preview = (p.text_preview || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const short = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+  const ts = p.created_at ? new Date(p.created_at).toLocaleDateString() : '';
+  const ht = p.hook_type || '';
+  return `<b>${ht}</b>  ${ts}<br><span style="font-size:11px">${short}</span>`;
+}
+
+const CHART_LAYOUT = {
+  paper_bgcolor: '#0f1117',
+  plot_bgcolor: '#0f1117',
+  font: { color: '#718096' },
+  xaxis: { showgrid: false, zeroline: false, showticklabels: false },
+  yaxis: { showgrid: false, zeroline: false, showticklabels: false },
+  margin: { l: 8, r: 8, t: 8, b: 8 },
+  hovermode: 'closest',
+  dragmode: 'zoom',
+  uirevision: 'static',
+};
+
+const CHART_CONFIG = {
+  responsive: true,
+  displayModeBar: true,
+  modeBarButtonsToRemove: ['toImage'],
+  displaylogo: false,
+};
+
+let chartReady = false;
+
+function renderScatter(points, highlightSession) {
+  const traces = buildTraces(points, highlightSession);
+  allTraces = traces;
+
+  if (!chartReady) {
+    Plotly.newPlot('chart-wrap', traces, CHART_LAYOUT, CHART_CONFIG);
+    document.getElementById('chart-wrap').on('plotly_click', onPointClick);
+    chartReady = true;
+  } else {
+    Plotly.react('chart-wrap', traces, CHART_LAYOUT, CHART_CONFIG);
+  }
+}
+
+function clearScatter(msg) {
+  allPoints = [];
+  allTraces = [];
+  if (chartReady) {
+    Plotly.react('chart-wrap', [], {
+      ...CHART_LAYOUT,
+      annotations: [{
+        text: msg || 'No data',
+        showarrow: false,
+        font: { size: 14, color: '#4a5568' },
+        xref: 'paper', yref: 'paper', x: 0.5, y: 0.5,
+      }]
+    }, CHART_CONFIG);
+  } else {
+    const el = document.getElementById('chart-wrap');
+    el.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#4a5568;font-size:14px">${msg}</div>`;
+  }
+}
+
+// ── Click handler ──────────────────────────────────────────────────────────
+async function onPointClick(event) {
+  const pt = event.points[0];
+  if (!pt || !pt.customdata) return;
+  const chunkId = pt.customdata;
+
+  document.getElementById('detail-content').innerHTML = '<div class="meta">Loading…</div>';
+
+  try {
+    const d = await api(`/dashboard/api/chunk/${chunkId}`);
+    const ts = d.created_at ? new Date(d.created_at).toLocaleString() : '';
+    const cidLabel = d.cluster_id === null ? 'unclustered' : (d.cluster_id < 0 ? 'noise' : `cluster #${d.cluster_id}`);
+    document.getElementById('detail-content').innerHTML = `
+      <div class="meta">${d.hook_type || ''} &nbsp;·&nbsp; ${cidLabel} &nbsp;·&nbsp; ${ts}</div>
+      <div class="meta">session: ${d.session_id ? d.session_id.slice(0,8)+'…' : '—'}</div>
+      <div class="text">${escapeHtml(d.text || '')}</div>
+      ${d.session_summary ? `<div class="summary"><b>Session summary:</b><br>${escapeHtml(d.session_summary)}</div>` : ''}
+    `;
+  } catch(e) {
+    document.getElementById('detail-content').innerHTML = `<div class="meta">Error: ${e.message}</div>`;
+  }
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Status bar ─────────────────────────────────────────────────────────────
+function updateStatus(chunks, clusters, noise, sessionLabel) {
+  document.getElementById('st-chunks').textContent = `${chunks.toLocaleString()} chunks`;
+  document.getElementById('st-clusters').textContent = `${clusters} clusters`;
+  document.getElementById('st-noise').textContent = `${noise} noise`;
+  document.getElementById('st-session').textContent = sessionLabel;
+}
+
+// ── Cluster config params ──────────────────────────────────────────────────
+async function loadClusterConfig(projectPath) {
+  try {
+    const cfg = await api(`/dashboard/api/cluster-config?project_path=${encodeURIComponent(projectPath)}`);
+    document.getElementById('p-mcs').value = cfg.min_cluster_size || 10;
+    document.getElementById('p-ms').value = cfg.min_samples || 3;
+    document.getElementById('p-nn').value = cfg.umap_n_neighbors || 15;
+    document.getElementById('p-md').value = cfg.umap_min_dist || 0.1;
+
+    // Update recluster button with last_clustered_at info
+    const btn = document.getElementById('btn-recluster');
+    if (cfg.last_clustered_at) {
+      const d = new Date(cfg.last_clustered_at);
+      btn.title = `Last clustered: ${d.toLocaleString()}`;
+    }
+  } catch(e) {
+    console.error('loadClusterConfig error', e);
+  }
+}
+
+async function saveConfig() {
+  if (!currentProject) return alert('Select a project first');
+  const btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/dashboard/api/cluster-config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        project_path: currentProject,
+        min_cluster_size: parseInt(document.getElementById('p-mcs').value),
+        min_samples: parseInt(document.getElementById('p-ms').value),
+        umap_n_neighbors: parseInt(document.getElementById('p-nn').value),
+        umap_min_dist: parseFloat(document.getElementById('p-md').value),
+      })
+    });
+    if (!r.ok) throw new Error(r.statusText);
+    btn.textContent = 'Saved ✓';
+    setTimeout(() => { btn.textContent = 'Save'; btn.disabled = false; }, 1500);
+  } catch(e) {
+    btn.textContent = 'Save';
+    btn.disabled = false;
+    alert('Save failed: ' + e.message);
+  }
+}
+
+async function triggerRecluster() {
+  if (!currentProject) return alert('Select a project first');
+  const btn = document.getElementById('btn-recluster');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Clustering…';
+
+  try {
+    const r = await fetch('/dashboard/api/recluster', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_path: currentProject })
+    });
+    if (r.status === 409) {
+      btn.innerHTML = 'Re-cluster';
+      btn.disabled = false;
+      return alert('Clustering already running.');
+    }
+    if (!r.ok) throw new Error(r.statusText);
+    startPolling(currentProject);
+  } catch(e) {
+    btn.innerHTML = 'Re-cluster';
+    btn.disabled = false;
+    alert('Failed: ' + e.message);
+  }
+}
+
+function startPolling(projectPath) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const st = await api(`/dashboard/api/recluster-status?project_path=${encodeURIComponent(projectPath)}`);
+      if (!st.running) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        const btn = document.getElementById('btn-recluster');
+        btn.innerHTML = 'Re-cluster';
+        btn.disabled = false;
+        // Reload scatter data
+        if (currentProject === projectPath) {
+          const data = await api(`/dashboard/api/clusters?project_path=${encodeURIComponent(projectPath)}`);
+          allPoints = data.points || [];
+          renderScatter(allPoints, currentSession);
+          updateStatus(data.total_chunks, data.n_clusters, data.noise_count,
+            currentSession ? `Session: ${currentSession.slice(0,8)}…` : 'All sessions');
+          loadClusterConfig(projectPath);
+        }
+      }
+    } catch(e) {
+      console.error('poll error', e);
+    }
+  }, 3000);
+}
+
+// ── Param panel toggle ─────────────────────────────────────────────────────
+document.getElementById('param-toggle').addEventListener('click', function() {
+  this.classList.toggle('collapsed');
+  document.getElementById('param-body').classList.toggle('hidden');
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>

@@ -56,7 +56,13 @@ from .config import (
     BM25_B,
     BM25_K1,
     BM25_WEIGHT,
+    CLUSTER_MIN_CLUSTER_SIZE,
+    CLUSTER_MIN_SAMPLES,
+    CLUSTER_UMAP_N_NEIGHBORS,
+    CLUSTER_UMAP_MIN_DIST,
     COSINE_DEDUP_THRESHOLD,
+    DASHBOARD_SESSION_SUMMARY_LEN,
+    DASHBOARD_TEXT_PREVIEW_LEN,
     DATA_DIR,
     HYBRID_RECALL_N,
     MIN_SESSION_SCORE,
@@ -100,6 +106,15 @@ _SESSION_SCHEMA = pa.schema([
     pa.field("updated_at", pa.string()),
 ])
 
+_CLUSTER_CONFIG_SCHEMA = pa.schema([
+    pa.field("project_path", pa.string()),          # primary key
+    pa.field("min_cluster_size", pa.int32()),
+    pa.field("min_samples", pa.int32()),
+    pa.field("umap_n_neighbors", pa.int32()),
+    pa.field("umap_min_dist", pa.float32()),
+    pa.field("last_clustered_at", pa.string()),     # ISO timestamp; empty string = never clustered
+])
+
 _CHUNK_SCHEMA = pa.schema([
     pa.field("chunk_id", pa.string()),
     pa.field("session_id", pa.string()),
@@ -114,6 +129,9 @@ _CHUNK_SCHEMA = pa.schema([
     pa.field("text_hash", pa.string()),
     pa.field("source_file", pa.string()),  # nullable
     pa.field("created_at", pa.string()),
+    pa.field("cluster_id", pa.int32(), nullable=True),    # HDBSCAN label; -1 = noise, null = 未聚類
+    pa.field("umap_x", pa.float32(), nullable=True),      # 2D UMAP x 座標
+    pa.field("umap_y", pa.float32(), nullable=True),      # 2D UMAP y 座標
 ])
 
 
@@ -218,6 +236,31 @@ class Storage:
                             logger.warning("add_columns hook_type with expr=%s failed: %s", expr, e)
             except Exception as e:
                 logger.error("turn_chunks migration failed: %s", e)
+
+            # Phase 6 migration: add cluster_id, umap_x, umap_y to turn_chunks
+            try:
+                chunk_col_names = self._chunks.schema.names  # refresh after hook_type migration
+                for col, expr in [("cluster_id", "CAST(NULL AS INTEGER)"),
+                                   ("umap_x", "CAST(NULL AS FLOAT)"),
+                                   ("umap_y", "CAST(NULL AS FLOAT)")]:
+                    if col not in chunk_col_names:
+                        for fallback in (expr, "NULL"):
+                            try:
+                                self._chunks.add_columns({col: fallback})
+                                logger.info("Migrated turn_chunks: added %s column", col)
+                                break
+                            except Exception as e:
+                                logger.warning("add_columns %s with expr=%s failed: %s", col, fallback, e)
+            except Exception as e:
+                logger.error("Phase 6 turn_chunks migration failed: %s", e)
+
+        # cluster_config table (Phase 6: per-project clustering parameters)
+        if "cluster_config" not in existing:
+            self._cluster_configs = self._db.create_table(
+                "cluster_config", schema=_CLUSTER_CONFIG_SCHEMA
+            )
+        else:
+            self._cluster_configs = self._db.open_table("cluster_config")
 
         self._initialized = True
 
@@ -1151,6 +1194,316 @@ class Storage:
                 "created_at": now,
             })
         return records
+
+    # ── Phase 6: Cluster helpers ──────────────────────────────────────────────
+
+    def get_project_chunks(self, project_path: str) -> list[dict]:
+        """Return all chunks for a project, ordered by session + created_at.
+
+        Uses a single full-table pandas scan filtered to the session_ids of
+        the given project (safer and simpler than building a SQL IN clause
+        with potentially hundreds of UUIDs).
+
+        Returns list of dicts with all chunk fields including vector.
+        """
+        assert self._initialized
+        # Step 1: get all session_ids for this project
+        sessions_result = self.list_sessions(project_path=project_path, limit=0)
+        session_ids = {s["session_id"] for s in sessions_result.get("sessions", [])}
+        if not session_ids:
+            return []
+
+        # Step 2: single full scan of turn_chunks, then filter by session_ids
+        try:
+            df = self._chunks.to_pandas()
+            df = df[df["session_id"].isin(session_ids)]
+            df = df.sort_values(["session_id", "created_at", "chunk_index"])
+            return df.to_dict(orient="records")
+        except Exception as e:
+            logger.warning("get_project_chunks failed: %s", e)
+            return []
+
+    # ── Phase 6: Cluster updates ───────────────────────────────────────────────
+
+    def update_chunk_clusters(self, updates: list[dict]) -> int:
+        """批次更新 cluster_id, umap_x, umap_y。
+
+        Args:
+            updates: list of dicts with keys:
+                - chunk_id: str
+                - cluster_id: int  (-1 = noise, >=0 = cluster label)
+                - umap_x: float
+                - umap_y: float
+
+        Returns:
+            Number of rows updated.
+        """
+        if not updates:
+            return 0
+
+        updated = 0
+        for row in updates:
+            chunk_id = row["chunk_id"]
+            cluster_id = int(row["cluster_id"]) if row["cluster_id"] is not None else None
+            umap_x = float(row["umap_x"]) if row["umap_x"] is not None else None
+            umap_y = float(row["umap_y"]) if row["umap_y"] is not None else None
+            try:
+                self._chunks.update(
+                    where=f"chunk_id = '{chunk_id}'",
+                    values={
+                        "cluster_id": cluster_id,
+                        "umap_x": umap_x,
+                        "umap_y": umap_y,
+                    },
+                )
+                updated += 1
+            except Exception as e:
+                logger.warning("update_chunk_clusters: failed for chunk_id=%s: %s", chunk_id, e)
+
+        self._invalidate_bm25_cache()
+        logger.debug("update_chunk_clusters: updated %d/%d rows", updated, len(updates))
+        return updated
+
+    # ── Phase 6: Dashboard storage helpers ────────────────────────────────────
+
+    def get_project_stats(self) -> list[dict]:
+        """Return list of distinct projects with their session counts.
+
+        Only includes projects with a non-empty project_path.
+        Returns: [{"project_path": str, "session_count": int}, ...]
+        """
+        assert self._initialized
+        try:
+            col_names = self._sessions.schema.names
+            if "project_path" not in col_names:
+                return []
+            df = self._sessions.to_pandas()
+            df = df[df["project_path"].notna() & (df["project_path"] != "")]
+            if df.empty:
+                return []
+            stats = (
+                df.groupby("project_path")
+                .agg(session_count=("session_id", "count"))
+                .reset_index()
+            )
+            return stats.to_dict(orient="records")
+        except Exception as e:
+            logger.warning("get_project_stats failed: %s", e)
+            return []
+
+    def get_sessions_for_project(self, project_path: str) -> list[dict]:
+        """Return sessions for a project with chunk counts and summary preview.
+
+        Returns:
+            [{"session_id", "chunk_count", "first_ts", "last_ts", "summary_preview"}, ...]
+        """
+        assert self._initialized
+        result = self.list_sessions(project_path=project_path, limit=0, include_body=True)
+        sessions = result.get("sessions", [])
+        if not sessions:
+            return []
+
+        session_ids = {s["session_id"] for s in sessions}
+
+        # Get chunk counts and timestamps in one scan (no vector column)
+        chunk_stats: dict[str, dict] = {}
+        try:
+            df = (
+                self._chunks.search()
+                .select(["session_id", "chunk_id", "created_at"])
+                .limit(500_000)
+                .to_pandas()
+            )
+            df = df[df["session_id"].isin(session_ids)]
+            if not df.empty:
+                stats_df = df.groupby("session_id").agg(
+                    chunk_count=("chunk_id", "count"),
+                    first_ts=("created_at", "min"),
+                    last_ts=("created_at", "max"),
+                )
+                chunk_stats = stats_df.to_dict(orient="index")
+        except Exception as e:
+            logger.warning("get_sessions_for_project chunk stats failed: %s", e)
+
+        out = []
+        for s in sessions:
+            sid = s["session_id"]
+            cs = chunk_stats.get(sid, {})
+            summary_text = s.get("summary_text") or s.get("opening") or ""
+            out.append({
+                "session_id": sid,
+                "chunk_count": cs.get("chunk_count", 0),
+                "first_ts": cs.get("first_ts") or s.get("created_at"),
+                "last_ts": cs.get("last_ts"),
+                "summary_preview": summary_text[:DASHBOARD_SESSION_SUMMARY_LEN],
+            })
+        return out
+
+    def get_cluster_data(
+        self,
+        project_path: str,
+        session_id: str | None = None,
+    ) -> list[dict]:
+        """Return clustered chunks for dashboard scatter plot.
+
+        Filters to only chunks where umap_x IS NOT NULL (already clustered).
+        Does NOT return the 384-dim vector.
+
+        Returns:
+            [{"chunk_id", "x", "y", "cluster_id", "text_preview",
+              "session_id", "hook_type", "created_at"}, ...]
+        """
+        assert self._initialized
+        if session_id:
+            chunks = self.get_session_chunks(session_id)
+        else:
+            chunks = self.get_project_chunks(project_path)
+
+        out = []
+        for c in chunks:
+            umap_x = c.get("umap_x")
+            umap_y = c.get("umap_y")
+            if umap_x is None or _is_null(umap_x):
+                continue  # skip unclustered chunks
+            if c.get("hook_type") == "tool_use":
+                continue  # exclude tool calls — noisy JSON, low semantic value
+            cluster_id_raw = c.get("cluster_id")
+            out.append({
+                "chunk_id": c.get("chunk_id"),
+                "x": float(umap_x),
+                "y": float(umap_y) if not _is_null(umap_y) else 0.0,
+                "cluster_id": int(cluster_id_raw) if not _is_null(cluster_id_raw) else None,
+                "text_preview": str(c.get("text", ""))[:DASHBOARD_TEXT_PREVIEW_LEN],
+                "session_id": c.get("session_id"),
+                "hook_type": c.get("hook_type"),
+                "created_at": c.get("created_at"),
+            })
+        return out
+
+    def get_chunk_detail(self, chunk_id: str) -> dict | None:
+        """Return full chunk details plus its session summary (for dashboard detail panel).
+
+        Args:
+            chunk_id: validated UUID string (caller must validate before passing in).
+
+        Returns:
+            dict with chunk fields + "session_summary", or None if not found.
+        """
+        assert self._initialized
+        try:
+            df = self._chunks.to_pandas(filter=f"chunk_id = '{chunk_id}'")
+            if df.empty:
+                raise ValueError("empty")
+        except Exception:
+            # Fallback
+            try:
+                df = (
+                    self._chunks.search()
+                    .where(f"chunk_id = '{chunk_id}'", prefilter=True)
+                    .limit(1)
+                    .to_pandas()
+                )
+            except Exception as e:
+                logger.warning("get_chunk_detail fallback failed: %s", e)
+                return None
+
+        if df.empty:
+            return None
+
+        row = df.iloc[0]
+        sid = row.get("session_id", "")
+        session = self.get_session(str(sid)) if sid else None
+        session_summary = session.get("summary_text") if session else None
+
+        cluster_id_raw = row.get("cluster_id")
+        umap_x_raw = row.get("umap_x")
+        umap_y_raw = row.get("umap_y")
+        return {
+            "chunk_id": row.get("chunk_id"),
+            "text": str(row.get("text", "")),
+            "session_id": sid,
+            "hook_type": row.get("hook_type"),
+            "cluster_id": int(cluster_id_raw) if not _is_null(cluster_id_raw) else None,
+            "umap_x": float(umap_x_raw) if not _is_null(umap_x_raw) else None,
+            "umap_y": float(umap_y_raw) if not _is_null(umap_y_raw) else None,
+            "created_at": row.get("created_at"),
+            "session_summary": session_summary,
+        }
+
+    def get_cluster_config(self, project_path: str) -> dict | None:
+        """Get per-project cluster config. Returns None if no config stored."""
+        assert self._initialized
+        try:
+            escaped = project_path.replace("'", "''")
+            df = (
+                self._cluster_configs.search()
+                .where(f"project_path = '{escaped}'", prefilter=True)
+                .limit(1)
+                .to_pandas()
+            )
+            if df.empty:
+                return None
+            row = df.iloc[0]
+            mcs_raw = row.get("min_cluster_size")
+            ms_raw = row.get("min_samples")
+            nn_raw = row.get("umap_n_neighbors")
+            md_raw = row.get("umap_min_dist")
+            lca_raw = row.get("last_clustered_at")
+            return {
+                "project_path": str(row["project_path"]),
+                "min_cluster_size": int(mcs_raw) if not _is_null(mcs_raw) else CLUSTER_MIN_CLUSTER_SIZE,
+                "min_samples": int(ms_raw) if not _is_null(ms_raw) else CLUSTER_MIN_SAMPLES,
+                "umap_n_neighbors": int(nn_raw) if not _is_null(nn_raw) else CLUSTER_UMAP_N_NEIGHBORS,
+                "umap_min_dist": float(md_raw) if not _is_null(md_raw) else CLUSTER_UMAP_MIN_DIST,
+                "last_clustered_at": None if (_is_null(lca_raw) or str(lca_raw) == "") else str(lca_raw),
+            }
+        except Exception as e:
+            logger.warning("get_cluster_config failed: %s", e)
+            return None
+
+    def upsert_cluster_config(self, project_path: str, **params) -> None:
+        """Insert or update per-project cluster config.
+
+        Unspecified params are preserved from existing row or default to config.py values.
+        """
+        assert self._initialized
+        existing = self.get_cluster_config(project_path)
+        min_cluster_size = int(params.get(
+            "min_cluster_size",
+            existing["min_cluster_size"] if existing else CLUSTER_MIN_CLUSTER_SIZE,
+        ))
+        min_samples = int(params.get(
+            "min_samples",
+            existing["min_samples"] if existing else CLUSTER_MIN_SAMPLES,
+        ))
+        umap_n_neighbors = int(params.get(
+            "umap_n_neighbors",
+            existing["umap_n_neighbors"] if existing else CLUSTER_UMAP_N_NEIGHBORS,
+        ))
+        umap_min_dist = float(params.get(
+            "umap_min_dist",
+            existing["umap_min_dist"] if existing else CLUSTER_UMAP_MIN_DIST,
+        ))
+        last_clustered_at = str(params.get(
+            "last_clustered_at",
+            existing["last_clustered_at"] if (existing and existing.get("last_clustered_at")) else "",
+        ))
+
+        row = pa.table({
+            "project_path": [project_path],
+            "min_cluster_size": pa.array([min_cluster_size], type=pa.int32()),
+            "min_samples": pa.array([min_samples], type=pa.int32()),
+            "umap_n_neighbors": pa.array([umap_n_neighbors], type=pa.int32()),
+            "umap_min_dist": pa.array([umap_min_dist], type=pa.float32()),
+            "last_clustered_at": [last_clustered_at],
+        })
+        (
+            self._cluster_configs.merge_insert("project_path")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(row)
+        )
+        logger.debug("upsert_cluster_config: %s → %s", project_path, params)
 
 
 # Module-level singleton

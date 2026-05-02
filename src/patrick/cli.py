@@ -655,5 +655,169 @@ def clear(
         raise typer.Exit(1)
 
 
+@app.command()
+def cluster(
+    project_path: str = typer.Argument(..., help="Project 絕對路徑，如 /Users/andy/llm-mem/patrick"),
+    min_cluster_size: int = typer.Option(0, "--min-cluster-size", help="HDBSCAN min_cluster_size（0 = 優先讀 cluster_config 表，無則用 config 預設值）"),
+    min_samples: int = typer.Option(0, "--min-samples", help="HDBSCAN min_samples（0 = 優先讀 cluster_config 表，無則用 config 預設值）"),
+    umap_n_neighbors: int = typer.Option(0, "--umap-n-neighbors", help="UMAP n_neighbors（0 = 優先讀 cluster_config 表，無則用 config 預設值）"),
+    umap_min_dist: float = typer.Option(-1.0, "--umap-min-dist", help="UMAP min_dist（負值 = 優先讀 cluster_config 表，無則用 config 預設值）"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只印統計結果，不寫入 DB", is_flag=True),
+) -> None:
+    """對指定 project 的所有 chunk 執行 HDBSCAN + UMAP 聚類，將結果寫回 DB。
+
+    可重複執行（idempotent）：每次都覆蓋舊的 cluster_id / umap_x / umap_y。
+    """
+    import os
+
+    typer.secho("\nPatrick cluster", fg=typer.colors.BRIGHT_CYAN, bold=True)
+    typer.echo("=" * 50)
+
+    # ── Import & init ──────────────────────────────────────────────────────────
+    try:
+        import numpy as np
+        from .config import (
+            CLUSTER_MIN_CLUSTER_SIZE,
+            CLUSTER_MIN_SAMPLES,
+            CLUSTER_UMAP_MIN_DIST,
+            CLUSTER_UMAP_N_NEIGHBORS,
+        )
+        from .storage import storage
+        from .clustering import engine as clustering_engine
+    except ImportError as e:
+        typer.secho(f"✗ Import error: {e}", fg=typer.colors.RED)
+        typer.secho("  Run: uv sync", fg=typer.colors.YELLOW)
+        raise typer.Exit(1)
+
+    # Normalize and validate project_path
+    project_path = os.path.realpath(os.path.expanduser(project_path))
+
+    # ── Load storage & read per-project cluster_config ────────────────────────
+    try:
+        storage.initialize()
+    except Exception as e:
+        typer.secho(f"✗ Storage init failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # Priority: CLI flag (non-zero/non-negative) → cluster_config DB → config.py
+    db_cfg = storage.get_cluster_config(project_path) or {}
+    eff_mcs  = min_cluster_size  if min_cluster_size > 0   else db_cfg.get("min_cluster_size",  CLUSTER_MIN_CLUSTER_SIZE)
+    eff_ms   = min_samples       if min_samples > 0        else db_cfg.get("min_samples",        CLUSTER_MIN_SAMPLES)
+    eff_nn   = umap_n_neighbors  if umap_n_neighbors > 0   else db_cfg.get("umap_n_neighbors",   CLUSTER_UMAP_N_NEIGHBORS)
+    eff_md   = umap_min_dist     if umap_min_dist >= 0.0   else db_cfg.get("umap_min_dist",      CLUSTER_UMAP_MIN_DIST)
+    src_label = "(from cluster_config DB)" if db_cfg and min_cluster_size == 0 else \
+                "(from CLI flag)" if min_cluster_size > 0 else "(from config.py)"
+
+    typer.echo(f"  Project:          {project_path}")
+    typer.echo(f"  min_cluster_size: {eff_mcs}  {src_label}")
+    typer.echo(f"  min_samples:      {eff_ms}")
+    typer.echo(f"  umap_n_neighbors: {eff_nn}")
+    typer.echo(f"  umap_min_dist:    {eff_md}")
+    typer.echo(f"  dry_run:          {dry_run}")
+    typer.echo("")
+
+    typer.echo("[1/4] Loading chunks...")
+    chunks = storage.get_project_chunks(project_path)
+    # Exclude tool_use chunks — they contain JSON/bash commands, not natural language;
+    # their embeddings are low-quality and create noisy clusters.
+    chunks = [c for c in chunks if c.get("hook_type", "") != "tool_use"]
+
+    if not chunks:
+        typer.secho(
+            f"✗ No chunks found for project: {project_path}\n"
+            "  Check the path is correct and that Patrick has recorded memories there.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(0)
+
+    N = len(chunks)
+    typer.echo(f"  Found {N:,} chunks")
+
+    # ── Build vector matrix ────────────────────────────────────────────────────
+    vectors = np.stack([np.asarray(c["vector"], dtype=np.float32) for c in chunks])
+    chunk_ids = [c["chunk_id"] for c in chunks]
+    texts = [c["text"] for c in chunks]
+
+    # ── Compute clusters ───────────────────────────────────────────────────────
+    typer.echo("[2/4] Running UMAP + HDBSCAN (may take 10–60s)...")
+    import time
+    t0 = time.time()
+    result = clustering_engine.compute(
+        vectors,
+        min_cluster_size=eff_mcs,
+        min_samples=eff_ms,
+        umap_n_neighbors=eff_nn,
+        umap_min_dist=eff_md,
+    )
+    elapsed = time.time() - t0
+    typer.echo(f"  Done in {elapsed:.1f}s: {result.n_clusters} clusters, "
+               f"{result.noise_count}/{N} noise ({100*result.noise_ratio:.1f}%)")
+
+    # ── Print summary ──────────────────────────────────────────────────────────
+    typer.echo("\n[3/4] Cluster summary:")
+    typer.echo("─" * 50)
+
+    def _representative_texts(label: int, top_k: int = 3) -> list[str]:
+        """Return top_k texts closest to the centroid of a cluster."""
+        mask = result.labels == label
+        cluster_vectors = vectors[mask]
+        cluster_texts = [texts[i] for i, m in enumerate(mask) if m]
+        if len(cluster_vectors) == 0:
+            return []
+        centroid = cluster_vectors.mean(axis=0)
+        norm = np.linalg.norm(centroid)
+        centroid = centroid / (norm + 1e-8)
+        normed = cluster_vectors / (np.linalg.norm(cluster_vectors, axis=1, keepdims=True) + 1e-8)
+        sims = normed @ centroid
+        top_idx = np.argsort(sims)[::-1][:top_k]
+        return [cluster_texts[i][:100] for i in top_idx]
+
+    # Print each cluster (sorted by size descending)
+    cluster_sizes = []
+    for c in range(result.n_clusters):
+        size = int(np.sum(result.labels == c))
+        cluster_sizes.append((c, size))
+    cluster_sizes.sort(key=lambda x: -x[1])
+
+    for label, size in cluster_sizes[:20]:  # show at most 20 clusters
+        typer.echo(f"\nCluster #{label} ({size:,} chunks):")
+        for text in _representative_texts(label):
+            preview = text.replace("\n", " ").strip()
+            typer.echo(f"  • {preview!r}")
+
+    if result.n_clusters > 20:
+        typer.echo(f"\n  ... and {result.n_clusters - 20} more clusters (use --dry-run to see all)")
+
+    noise_texts = _representative_texts(-1, top_k=3)
+    if noise_texts:
+        typer.echo(f"\nNoise (-1, {result.noise_count:,} chunks):")
+        for text in noise_texts:
+            preview = text.replace("\n", " ").strip()
+            typer.echo(f"  • {preview!r}")
+
+    # ── Write back to DB ───────────────────────────────────────────────────────
+    if dry_run:
+        typer.echo("\n[4/4] --dry-run: skipping DB write.")
+    else:
+        typer.echo("\n[4/4] Writing cluster results to DB...")
+        updates = []
+        for i, chunk_id in enumerate(chunk_ids):
+            updates.append({
+                "chunk_id": chunk_id,
+                "cluster_id": int(result.labels[i]),
+                "umap_x": float(result.umap_coords[i, 0]),
+                "umap_y": float(result.umap_coords[i, 1]),
+            })
+
+        written = storage.update_chunk_clusters(updates)
+        typer.secho(f"  ✓ Updated {written:,}/{N:,} chunks", fg=typer.colors.GREEN)
+
+    typer.secho(
+        f"\n✓ Clustering complete: {result.n_clusters} clusters, "
+        f"{result.noise_count} noise ({100*result.noise_ratio:.1f}%)",
+        fg=typer.colors.GREEN,
+    )
+
+
 if __name__ == "__main__":
     app()

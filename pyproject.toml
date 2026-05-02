@@ -21,6 +21,10 @@ dependencies = [
     "jieba>=0.42.1",
     "rank-bm25>=0.2.2",
     "sentence-transformers>=3.0.0",
+    # Phase 6: clustering & visualization
+    "hdbscan>=0.8.33",
+    "umap-learn>=0.5.5",
+    "plotly>=5.18.0",
 ]
 
 [project.optional-dependencies]
