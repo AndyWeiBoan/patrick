@@ -68,8 +68,8 @@ mcp = FastMCP(
         "  → memory_search. Searches all chunk content semantically.\n"
         "- memory_save: use sparingly — only for explicit user requests or major decisions.\n\n"
         "SEARCH TIPS:\n"
-        "- Default memory_search uses hook_type=None (all chunks). Add hook_type='assistant_text'\n"
-        "  for higher-quality semantic results, or hook_type='user_prompt' for user questions.\n"
+        "- Default memory_search uses hook_type=['user_prompt','assistant_text'] (excludes tool_use).\n"
+        "  Pass hook_type='tool_use' to search tool records, or hook_type='assistant_text' only for highest quality.\n"
         "- If results are insufficient, try mode='hybrid' for BM25+vector fusion."
     ),
 )

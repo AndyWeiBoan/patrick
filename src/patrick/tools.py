@@ -102,13 +102,15 @@ async def memory_search(
         "user_prompt"    — only user inputs
         "tool_use"       — only tool call records
         ["assistant_text", "user_prompt"] — pass a list to match multiple types
-        None (default)   — no filter, search all chunks
+        None (default)   — ["user_prompt", "assistant_text"] (excludes tool_use noise)
     project_path: Phase 5 — absolute path of the project directory (e.g. "/Users/andy/my-project").
         If provided, search is restricted to chunks from sessions in that project only.
         Two-stage: first fetches all session_ids for the project, then searches within them.
         All three search modes (vector, hybrid, recency) respect this filter.
         Empty string or None (default) = search across all sessions.
     """
+    if hook_type is None:
+        hook_type = ["user_prompt", "assistant_text"]
     t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
 
@@ -225,6 +227,8 @@ async def memory_deep_search(
     session that was not present in the retrieved results (e.g. you fixed a bug, made a
     new architectural decision, or explicitly want to record a current-session insight).
     """
+    if hook_type is None:
+        hook_type = ["user_prompt", "assistant_text"]
     t0 = time.perf_counter()
     vectors = await provider.embed_async([query])
     q_vec = vectors[0]
